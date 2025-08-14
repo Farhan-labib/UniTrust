@@ -40,7 +40,7 @@ LABEL summary="$SUMMARY" \
 RUN useradd -U -ms /bin/bash -u $uid $user
 
 # Install environment
-RUN apt-get update -y && \
+RUN apt-get -o Acquire::Check-Valid-Until=false update -y && \
     apt-get install -y --no-install-recommends \
     apt-transport-https \
     ca-certificates \
