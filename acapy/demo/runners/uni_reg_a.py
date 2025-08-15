@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 import asyncio
 import datetime
 import json
@@ -9,20 +8,18 @@ import sys
 import time
 from aiohttp import ClientError
 from qrcode import QRCode
-
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from runners.agent_container import (  # noqa:E402
+from runners.agent_container import (
     AriesAgent,
     arg_parser,
     create_agent_with_args,
 )
-from runners.support.agent import (  # noqa:E402
+from runners.support.agent import (
     CRED_FORMAT_INDY,
     CRED_FORMAT_JSON_LD,
     SIG_TYPE_BLS,
 )
-from runners.support.utils import (  # noqa:E402
+from runners.support.utils import (
     log_msg,
     log_status,
     prompt,
@@ -33,10 +30,10 @@ CRED_PREVIEW_TYPE = "https://didcomm.org/issue-credential/2.0/credential-preview
 SELF_ATTESTED = os.getenv("SELF_ATTESTED")
 TAILS_FILE_COUNT = int(os.getenv("TAILS_FILE_COUNT", 100))
 DEMO_EXTRA_AGENT_ARGS = os.getenv("DEMO_EXTRA_AGENT_ARGS")
+DOCKERHOST = os.getenv("DOCKERHOST", "host.docker.internal")
 
 logging.basicConfig(level=logging.WARNING)
 LOGGER = logging.getLogger(__name__)
-
 
 class UniRegAAgent(AriesAgent):
     def __init__(
@@ -53,12 +50,13 @@ class UniRegAAgent(AriesAgent):
         log_level: str = None,
         **kwargs,
     ):
+        # IMPORTANT: Force no_auto to True to prevent automatic issuance
         super().__init__(
             ident,
             http_port,
             admin_port,
             prefix="UniRegA",
-            no_auto=no_auto,
+            no_auto=True,  # Force this to True
             endorser_role=endorser_role,
             revocation=revocation,
             anoncreds_legacy_revocation=anoncreds_legacy_revocation,
@@ -68,11 +66,11 @@ class UniRegAAgent(AriesAgent):
             **kwargs,
         )
         self.connection_id = None
-        self._connection_ready = None
+        self._connection_ready = asyncio.Future()
         self.cred_state = {}
-        # TODO define a dict to hold credential attributes
-        # based on cred_def_id
         self.cred_attrs = {}
+        self.admin_connection_id = None
+        self.pending_approvals = {}
 
     async def detect_connection(self):
         await self._connection_ready
@@ -82,14 +80,33 @@ class UniRegAAgent(AriesAgent):
     def connection_ready(self):
         return self._connection_ready.done() and self._connection_ready.result()
 
+    async def handle_connections(self, message):
+        """Handle connection state changes"""
+        connection_id = message["connection_id"]
+        state = message["state"]
+        
+        self.log(f"Connection {connection_id} in state {state}")
+        
+        # Handle admin connection
+        if connection_id == self.admin_connection_id and state in ("active", "response"):
+            log_msg(f"✅ Admin connection established: {connection_id}")
+            
+        # Handle student connection
+        elif state in ("active", "response") and not self.connection_id:
+            log_msg(f"🎓 Student connection established: {connection_id}")
+            self.connection_id = connection_id
+            
+            # Mark connection as ready
+            if not self._connection_ready.done():
+                self._connection_ready.set_result(True)
+
     def generate_credential_offer(self, aip, cred_type, cred_def_id, exchange_tracing):
         age = 22
         d = datetime.date.today()
         birth_date = datetime.date(d.year - age, d.month, d.day)
         birth_date_format = "%Y%m%d"
-
+        
         if aip == 10:
-            # define attributes to send for credential
             self.cred_attrs[cred_def_id] = {
                 "student_name": "John Doe",
                 "student_id": "STU123456",
@@ -100,7 +117,6 @@ class UniRegAAgent(AriesAgent):
                 "birthdate_dateint": birth_date.strftime(birth_date_format),
                 "timestamp": str(int(time.time())),
             }
-
             cred_preview = {
                 "@type": CRED_PREVIEW_TYPE,
                 "attributes": [
@@ -108,7 +124,7 @@ class UniRegAAgent(AriesAgent):
                     for (n, v) in self.cred_attrs[cred_def_id].items()
                 ],
             }
-            offer_request = {
+            return {
                 "connection_id": self.connection_id,
                 "cred_def_id": cred_def_id,
                 "comment": f"University Registration offer on cred def id {cred_def_id}",
@@ -116,8 +132,6 @@ class UniRegAAgent(AriesAgent):
                 "credential_preview": cred_preview,
                 "trace": exchange_tracing,
             }
-            return offer_request
-
         elif aip == 20:
             if cred_type == CRED_FORMAT_INDY:
                 self.cred_attrs[cred_def_id] = {
@@ -130,7 +144,6 @@ class UniRegAAgent(AriesAgent):
                     "birthdate_dateint": birth_date.strftime(birth_date_format),
                     "timestamp": str(int(time.time())),
                 }
-
                 cred_preview = {
                     "@type": CRED_PREVIEW_TYPE,
                     "attributes": [
@@ -138,7 +151,7 @@ class UniRegAAgent(AriesAgent):
                         for (n, v) in self.cred_attrs[cred_def_id].items()
                     ],
                 }
-                offer_request = {
+                return {
                     "connection_id": self.connection_id,
                     "comment": f"University Registration offer on cred def id {cred_def_id}",
                     "auto_remove": False,
@@ -146,10 +159,8 @@ class UniRegAAgent(AriesAgent):
                     "filter": {"indy": {"cred_def_id": cred_def_id}},
                     "trace": exchange_tracing,
                 }
-                return offer_request
-
             elif cred_type == CRED_FORMAT_JSON_LD:
-                offer_request = {
+                return {
                     "connection_id": self.connection_id,
                     "filter": {
                         "ld_proof": {
@@ -179,254 +190,200 @@ class UniRegAAgent(AriesAgent):
                         }
                     },
                 }
-                return offer_request
             else:
-                raise Exception(f"Error invalid credential type: {self.cred_type}")
+                raise Exception(f"Error invalid credential type: {cred_type}")
         else:
-            raise Exception(f"Error invalid AIP level: {self.aip}")
+            raise Exception(f"Error invalid AIP level: {aip}")
 
-    def generate_proof_request_web_request(
-        self, aip, cred_type, revocation, exchange_tracing, connectionless=False
-    ):
-        age = 18
-        d = datetime.date.today()
-        birth_date = datetime.date(d.year - age, d.month, d.day)
-        birth_date_format = "%Y%m%d"
+    # Override the base class methods to prevent automatic credential issuance
+    async def handle_issue_credential(self, message):
+        """Override base class method to prevent automatic credential issuance"""
+        state = message.get("state")
+        credential_exchange_id = message["credential_exchange_id"]
+        prev_state = self.cred_state.get(credential_exchange_id)
+        if prev_state == state:
+            return  # ignore
+        self.cred_state[credential_exchange_id] = state
+        
+        self.log(
+            "Credential: state = {}, credential_exchange_id = {}".format(
+                state, credential_exchange_id,
+            )
+        )
+        
+        if state == "request_received":
+            log_msg(f"🔄 Credential request received for exchange ID: {credential_exchange_id}")
+            log_msg(f"⏳ Waiting for admin approval before issuing credential...")
+            
+            # Get student details
+            student_name = "Unknown"
+            try:
+                record = await self.admin_GET(f"/issue-credential/records/{credential_exchange_id}")
+                if "credential_proposal_dict" in record and record["credential_proposal_dict"]:
+                    attributes = record["credential_proposal_dict"]["credential_proposal"]["attributes"]
+                    student_name = next((attr["value"] for attr in attributes if attr["name"] == "student_name"), "Unknown")
+            except Exception as e:
+                log_msg(f"⚠️ Could not extract student name: {str(e)}")
+                
+            # Send approval request to admin - DO NOT AUTO-ISSUE
+            await self.send_approval_request(credential_exchange_id, student_name, "issue_credential")
+            
+        elif state == "credential_acked":
+            cred_id = message["credential_id"]
+            self.log(f"Stored credential {cred_id} in wallet")
+            log_status(f"#18.1 Stored credential {cred_id} in wallet")
+            log_msg(f"✅ Credential successfully issued and received for exchange ID: {credential_exchange_id}")
+        elif state == "abandoned":
+            log_status("Credential exchange abandoned")
+            self.log("Problem report message:", message.get("error_msg"))
 
-        if aip == 10:
-            req_attrs = [
-                {
-                    "name": "student_name",
-                    "restrictions": [{"schema_name": "university registration schema"}],
-                },
-                {
-                    "name": "student_id",
-                    "restrictions": [{"schema_name": "university registration schema"}],
-                },
-                {
-                    "name": "program",
-                    "restrictions": [{"schema_name": "university registration schema"}],
-                },
-            ]
-            if revocation:
-                req_attrs.append(
-                    {
-                        "name": "enrollment_date",
-                        "restrictions": [{"schema_name": "university registration schema"}],
-                        "non_revoked": {"to": int(time.time() - 1)},
-                    },
-                )
-            else:
-                req_attrs.append(
-                    {
-                        "name": "enrollment_date",
-                        "restrictions": [{"schema_name": "university registration schema"}],
-                    }
-                )
+    async def handle_issue_credential_v2_0(self, message):
+        """Override base class method to prevent automatic credential issuance"""
+        state = message.get("state")
+        cred_ex_id = message["cred_ex_id"]
+        prev_state = self.cred_state.get(cred_ex_id)
+        if prev_state == state:
+            return  # ignore
+        self.cred_state[cred_ex_id] = state
+        
+        self.log(f"Credential: state = {state}, cred_ex_id = {cred_ex_id}")
+        
+        if state == "request-received":
+            log_msg(f"🔄 Credential request received for exchange ID: {cred_ex_id}")
+            log_msg(f"⏳ Waiting for admin approval before issuing credential...")
+            
+            # Get student details
+            student_name = "Unknown"
+            try:
+                record = await self.admin_GET(f"/issue-credential-2.0/records/{cred_ex_id}")
+                if "by_format" in record and record["by_format"]:
+                    # Try to extract from different possible formats
+                    if "cred_offer" in record["by_format"] and record["by_format"]["cred_offer"]:
+                        if "indy" in record["by_format"]["cred_offer"]:
+                            attrs = record["by_format"]["cred_offer"]["indy"].get("credential_preview", {}).get("attributes", [])
+                            student_name = next((attr["value"] for attr in attrs if attr["name"] == "student_name"), "Unknown")
+                    # Also try from credential_proposal_dict if available
+                    elif "credential_proposal_dict" in record and record["credential_proposal_dict"]:
+                        attributes = record["credential_proposal_dict"]["credential_proposal"]["attributes"]
+                        student_name = next((attr["value"] for attr in attributes if attr["name"] == "student_name"), "Unknown")
+            except Exception as e:
+                log_msg(f"⚠️ Could not extract student name: {str(e)}")
+                
+            # Send approval request to admin - DO NOT AUTO-ISSUE
+            await self.send_approval_request(cred_ex_id, student_name, "issue_credential_v2_0")
+            
+        elif state == "done":
+            log_msg(f"✅ Credential successfully issued and received for exchange ID: {cred_ex_id}")
+        elif state == "abandoned":
+            log_status("Credential exchange abandoned")
+            self.log("Problem report message:", message.get("error_msg"))
 
-            if SELF_ATTESTED:
-                # test self-attested claims
-                req_attrs.append(
-                    {"name": "self_attested_thing"},
-                )
+    async def handle_events(self, event):
+        if event["topic"] == "connections":
+            await self.handle_connections(event["payload"])
+        elif event["topic"] == "basicmessages":
+            msg = event["payload"]
+            if msg["connection_id"] == self.admin_connection_id:
+                await self.handle_admin_message(msg["content"])
+        
+        # Let the overridden methods handle credential events
+        elif event["topic"] == "issue_credential":
+            await self.handle_issue_credential(event["payload"])
+        elif event["topic"] == "issue_credential_v2_0":
+            await self.handle_issue_credential_v2_0(event["payload"])
 
-            req_preds = [
-                # test zero-knowledge proofs
-                {
-                    "name": "birthdate_dateint",
-                    "p_type": "<=",
-                    "p_value": int(birth_date.strftime(birth_date_format)),
-                    "restrictions": [{"schema_name": "university registration schema"}],
-                }
-            ]
+    async def handle_admin_message(self, content):
+        try:
+            data = json.loads(content)
+            if data.get("type") == "approval_response" and data["approved"]:
+                cred_ex_id = data["cred_ex_id"]
+                api_version = data.get("api_version", "v1")
+                
+                if cred_ex_id in self.pending_approvals:
+                    log_msg(f"✅ Received approval for exchange ID: {cred_ex_id}")
+                    
+                    # Issue the credential based on API version
+                    try:
+                        if api_version == "v2":
+                            await self.admin_POST(
+                                f"/issue-credential-2.0/records/{cred_ex_id}/issue",
+                                {"comment": "Approved by University Admin"}
+                            )
+                        else:
+                            await self.admin_POST(
+                                f"/issue-credential/records/{cred_ex_id}/issue",
+                                {"comment": "Approved by University Admin"}
+                            )
+                        
+                        del self.pending_approvals[cred_ex_id]
+                        log_msg(f"✅ Credential issued for exchange ID: {cred_ex_id}")
+                        
+                    except Exception as e:
+                        log_msg(f"❌ Error issuing credential: {str(e)}")
+                        
+            elif data.get("type") == "approval_response" and not data["approved"]:
+                cred_ex_id = data["cred_ex_id"]
+                reason = data.get("reason", "Denied by admin")
+                
+                if cred_ex_id in self.pending_approvals:
+                    log_msg(f"❌ Credential denied for exchange ID: {cred_ex_id}")
+                    log_msg(f"   Reason: {reason}")
+                    del self.pending_approvals[cred_ex_id]
+                    
+        except json.JSONDecodeError:
+            pass
 
-            indy_proof_request = {
-                "name": "Proof of University Registration",
-                "version": "1.0",
-                "requested_attributes": {
-                    f"0_{req_attr['name']}_uuid": req_attr for req_attr in req_attrs
-                },
-                "requested_predicates": {
-                    f"0_{req_pred['name']}_GE_uuid": req_pred for req_pred in req_preds
-                },
+    async def send_approval_request(self, cred_ex_id, student_name, api_topic):
+        if not self.admin_connection_id:
+            log_msg("❌ No admin connection to send approval request")
+            return
+            
+        self.pending_approvals[cred_ex_id] = {
+            "student_name": student_name,
+            "status": "pending",
+            "api_topic": api_topic
+        }
+        
+        # Determine API version for the admin
+        api_version = "v2" if api_topic == "issue_credential_v2_0" else "v1"
+        
+        await self.admin_POST(
+            f"/connections/{self.admin_connection_id}/send-message",
+            {
+                "content": json.dumps({
+                    "type": "approval_request",
+                    "cred_ex_id": cred_ex_id,
+                    "student_name": student_name,
+                    "api_version": api_version
+                })
             }
-
-            if revocation:
-                indy_proof_request["non_revoked"] = {"to": int(time.time())}
-
-            proof_request_web_request = {
-                "proof_request": indy_proof_request,
-                "trace": exchange_tracing,
-            }
-            if not connectionless:
-                proof_request_web_request["connection_id"] = self.connection_id
-            return proof_request_web_request
-
-        elif aip == 20:
-            if cred_type == CRED_FORMAT_INDY:
-                req_attrs = [
-                    {
-                        "name": "student_name",
-                        "restrictions": [{"schema_name": "university registration schema"}],
-                    },
-                    {
-                        "name": "student_id",
-                        "restrictions": [{"schema_name": "university registration schema"}],
-                    },
-                    {
-                        "name": "program",
-                        "restrictions": [{"schema_name": "university registration schema"}],
-                    },
-                ]
-                if revocation:
-                    req_attrs.append(
-                        {
-                            "name": "enrollment_date",
-                            "restrictions": [{"schema_name": "university registration schema"}],
-                            "non_revoked": {"to": int(time.time() - 1)},
-                        },
-                    )
-                else:
-                    req_attrs.append(
-                        {
-                            "name": "enrollment_date",
-                            "restrictions": [{"schema_name": "university registration schema"}],
-                        }
-                    )
-
-                if SELF_ATTESTED:
-                    # test self-attested claims
-                    req_attrs.append(
-                        {"name": "self_attested_thing"},
-                    )
-
-                req_preds = [
-                    # test zero-knowledge proofs
-                    {
-                        "name": "birthdate_dateint",
-                        "p_type": "<=",
-                        "p_value": int(birth_date.strftime(birth_date_format)),
-                        "restrictions": [{"schema_name": "university registration schema"}],
-                    }
-                ]
-
-                indy_proof_request = {
-                    "name": "Proof of University Registration",
-                    "version": "1.0",
-                    "requested_attributes": {
-                        f"0_{req_attr['name']}_uuid": req_attr for req_attr in req_attrs
-                    },
-                    "requested_predicates": {
-                        f"0_{req_pred['name']}_GE_uuid": req_pred
-                        for req_pred in req_preds
-                    },
-                }
-
-                if revocation:
-                    indy_proof_request["non_revoked"] = {"to": int(time.time())}
-
-                proof_request_web_request = {
-                    "presentation_request": {"indy": indy_proof_request},
-                    "trace": exchange_tracing,
-                }
-                if not connectionless:
-                    proof_request_web_request["connection_id"] = self.connection_id
-                return proof_request_web_request
-
-            elif cred_type == CRED_FORMAT_JSON_LD:
-                proof_request_web_request = {
-                    "comment": "test proof request for university registration json-ld",
-                    "presentation_request": {
-                        "dif": {
-                            "options": {
-                                "challenge": "3fa85f64-5717-4562-b3fc-2c963f66afa7",
-                                "domain": "4jt78h47fh47",
-                            },
-                            "presentation_definition": {
-                                "id": "32f54163-7166-48f1-93d8-ff217bdb0654",
-                                "format": {"ldp_vp": {"proof_type": [SIG_TYPE_BLS]}},
-                                "input_descriptors": [
-                                    {
-                                        "id": "university_input_1",
-                                        "name": "University Student Credential",
-                                        "schema": [
-                                            {
-                                                "uri": "https://www.w3.org/2018/credentials#VerifiableCredential"
-                                            },
-                                            {
-                                                "uri": "https://w3id.org/citizenship#UniversityStudent"
-                                            },
-                                        ],
-                                        "constraints": {
-                                            "limit_disclosure": "required",
-                                            "is_holder": [
-                                                {
-                                                    "directive": "required",
-                                                    "field_id": [
-                                                        "1f44d55f-f161-4938-a659-f8026467f126"
-                                                    ],
-                                                }
-                                            ],
-                                            "fields": [
-                                                {
-                                                    "id": "1f44d55f-f161-4938-a659-f8026467f126",
-                                                    "path": [
-                                                        "$.credentialSubject.familyName"
-                                                    ],
-                                                    "purpose": "The claim must be from one of the specified person",
-                                                    "filter": {"const": "DOE"},
-                                                },
-                                                {
-                                                    "path": [
-                                                        "$.credentialSubject.givenName"
-                                                    ],
-                                                    "purpose": "The claim must be from one of the specified person",
-                                                },
-                                            ],
-                                        },
-                                    }
-                                ],
-                            },
-                        }
-                    },
-                }
-                if not connectionless:
-                    proof_request_web_request["connection_id"] = self.connection_id
-                return proof_request_web_request
-            else:
-                raise Exception(f"Error invalid credential type: {self.cred_type}")
-        else:
-            raise Exception(f"Error invalid AIP level: {self.aip}")
-
+        )
+        
+        log_msg(f"📤 Sent approval request for {student_name} to admin (Exchange ID: {cred_ex_id})")
 
 async def main(args):
     extra_args = None
     if DEMO_EXTRA_AGENT_ARGS:
         extra_args = json.loads(DEMO_EXTRA_AGENT_ARGS)
-        print("Got extra args:", extra_args)
-
+    
+    # IMPORTANT: Force no-auto mode to prevent automatic credential issuance
+    args.no_auto = True
+    
     uni_reg_a_agent = await create_agent_with_args(
         args,
         ident="uni_reg_a",
         extra_args=extra_args,
     )
-
+    
     try:
-        log_status(
-            "#1 Provision an agent and wallet, get back configuration details"
-            + (
-                f" (Wallet type: {uni_reg_a_agent.wallet_type})"
-                if uni_reg_a_agent.wallet_type
-                else ""
-            )
-        )
+        log_status("#1 Provision an agent and wallet")
         agent = UniRegAAgent(
             "uni_reg_a.agent",
             uni_reg_a_agent.start_port,
             uni_reg_a_agent.start_port + 1,
             genesis_data=uni_reg_a_agent.genesis_txns,
             genesis_txn_list=uni_reg_a_agent.genesis_txn_list,
-            no_auto=uni_reg_a_agent.no_auto,
+            no_auto=True,  # Force no auto
             tails_server_base_url=uni_reg_a_agent.tails_server_base_url,
             revocation=uni_reg_a_agent.revocation,
             timing=uni_reg_a_agent.show_timing,
@@ -437,434 +394,275 @@ async def main(args):
             aip=uni_reg_a_agent.aip,
             endorser_role=uni_reg_a_agent.endorser_role,
             anoncreds_legacy_revocation=uni_reg_a_agent.anoncreds_legacy_revocation,
-            log_file=uni_reg_a_agent.log_file,
-            log_config=uni_reg_a_agent.log_config,
-            log_level=uni_reg_a_agent.log_level,
-            reuse_connections=uni_reg_a_agent.reuse_connections,
-            multi_use_invitations=uni_reg_a_agent.multi_use_invitations,
-            public_did_connections=uni_reg_a_agent.public_did_connections,
             extra_args=extra_args,
         )
-
+        
         uni_reg_a_schema_name = "university registration schema"
         uni_reg_a_schema_attrs = [
-            "student_name",
-            "student_id",
-            "enrollment_date",
-            "program",
-            "year",
-            "gpa",
-            "birthdate_dateint",
-            "timestamp",
+            "student_name", "student_id", "enrollment_date",
+            "program", "year", "gpa", "birthdate_dateint", "timestamp"
         ]
-
+        
         if uni_reg_a_agent.cred_type == CRED_FORMAT_INDY:
             uni_reg_a_agent.public_did = True
             await uni_reg_a_agent.initialize(
                 the_agent=agent,
                 schema_name=uni_reg_a_schema_name,
                 schema_attrs=uni_reg_a_schema_attrs,
-                create_endorser_agent=(
-                    (uni_reg_a_agent.endorser_role == "author")
-                    if uni_reg_a_agent.endorser_role
-                    else False
-                ),
             )
         elif uni_reg_a_agent.cred_type == CRED_FORMAT_JSON_LD:
             uni_reg_a_agent.public_did = True
             await uni_reg_a_agent.initialize(the_agent=agent)
         else:
-            raise Exception("Invalid credential type:" + uni_reg_a_agent.cred_type)
-
-        # generate an invitation for students
+            raise Exception("Invalid credential type")
+        
+        # Connect to admin agent
+        log_status("#2 Connect to University Admin")
+        log_msg("Paste the FULL admin invitation JSON (from uni_admin_a output):")
+        log_msg("Press Enter on an empty line to submit")
+        invitation_lines = []
+        while True:
+            line = await prompt("")
+            if line.strip() == "" and invitation_lines:
+                break
+            if line.strip() != "":
+                invitation_lines.append(line.strip())
+                
+        invitation_json = "".join(invitation_lines).replace("\n", "").replace("\r", "")
+        
+        try:
+            # Parse and validate the invitation
+            invitation = json.loads(invitation_json)
+            
+            # Ensure the invitation has the required structure
+            if "services" in invitation and isinstance(invitation["services"], list):
+                for service in invitation["services"]:
+                    if service.get("type") == "did-communication":
+                        if "recipientKeys" not in service:
+                            service["recipientKeys"] = []
+                        if "serviceEndpoint" not in service:
+                            service["serviceEndpoint"] = f"http://{DOCKERHOST.replace('{PORT}', str(uni_reg_a_agent.start_port))}"
+                        if "id" not in service:
+                            service["id"] = "#inline"
+            
+            log_msg(f"Processed invitation: {json.dumps(invitation, indent=2)}")
+            
+            # Use the newer connection method
+            try:
+                response = await agent.admin_POST("/out-of-band/receive-invitation", invitation)
+                agent.admin_connection_id = response["connection_id"]
+                log_msg(f"🔗 Admin connection initiated: {agent.admin_connection_id}")
+                
+                # Also try to manually accept the invitation if needed
+                await asyncio.sleep(2)
+                try:
+                    await agent.admin_POST(f"/didexchange/{agent.admin_connection_id}/accept-invitation")
+                    log_msg("🤝 Sent connection acceptance")
+                except Exception as e:
+                    log_msg(f"⚠️ Note: Could not send accept-invitation (might not be needed): {str(e)}")
+                
+            except Exception as e:
+                log_msg(f"❌ Error with out-of-band invitation, trying legacy method: {str(e)}")
+                
+                # Fallback to legacy connection method
+                try:
+                    # Convert out-of-band to legacy format
+                    legacy_invitation = {
+                        "@type": "did:sov:BzCbsNYhMrjHiqZDTUASHg;spec/connections/1.0/invitation",
+                        "@id": invitation["@id"],
+                        "label": invitation["label"],
+                        "recipientKeys": invitation["services"][0]["recipientKeys"],
+                        "serviceEndpoint": invitation["services"][0]["serviceEndpoint"]
+                    }
+                    
+                    response = await agent.admin_POST("/connections/receive-invitation", legacy_invitation)
+                    agent.admin_connection_id = response["connection_id"]
+                    log_msg(f"🔗 Admin connection initiated (legacy): {agent.admin_connection_id}")
+                    
+                    # Accept the invitation
+                    await asyncio.sleep(1)
+                    await agent.admin_POST(f"/connections/{agent.admin_connection_id}/accept-invitation")
+                    log_msg("🤝 Sent legacy connection acceptance")
+                    
+                except Exception as e2:
+                    log_msg(f"❌ Both connection methods failed: {str(e2)}")
+                    return
+            
+            # Wait for admin connection to become active
+            log_msg("⏳ Waiting for admin connection to establish...")
+            max_wait = 30  # 30 seconds timeout
+            wait_count = 0
+            while wait_count < max_wait:
+                try:
+                    connection = await agent.admin_GET(f"/connections/{agent.admin_connection_id}")
+                    state = connection['state']
+                    
+                    # Only log state changes to reduce noise
+                    if wait_count == 0 or wait_count % 5 == 0:
+                        log_msg(f"Admin connection state: {state}")
+                    
+                    if state in ("active", "response", "completed"):
+                        log_msg("✅ Admin connection established successfully!")
+                        break
+                    elif state == "error":
+                        log_msg("❌ Admin connection failed!")
+                        break
+                        
+                    await asyncio.sleep(1)
+                    wait_count += 1
+                    
+                except Exception as e:
+                    if wait_count % 5 == 0:  # Only log every 5 attempts
+                        log_msg(f"⚠️ Error checking connection: {str(e)}")
+                    await asyncio.sleep(1)
+                    wait_count += 1
+            
+            if wait_count >= max_wait:
+                log_msg("⏰ Timeout waiting for admin connection, but proceeding...")
+                log_msg("💡 You can try the connection again or proceed - some functionality may be limited")
+            
+        except json.JSONDecodeError as e:
+            log_msg(f"❌ Invalid JSON format: {str(e)}")
+            return
+        except KeyError as e:
+            log_msg(f"❌ Missing expected key: {str(e)}")
+            return
+        except Exception as e:
+            log_msg(f"❌ Unexpected error: {str(e)}")
+            log_msg(f"Error details: {str(e.__cause__) if hasattr(e, '__cause__') else 'No additional details'}")
+            return
+                
+        # Generate invitation for students
+        log_status("#3 Generate invitation for students")
         await uni_reg_a_agent.generate_invitation(
             display_qr=True,
             reuse_connections=uni_reg_a_agent.reuse_connections,
-            multi_use_invitations=uni_reg_a_agent.multi_use_invitations,
-            public_did_connections=uni_reg_a_agent.public_did_connections,
             wait=True,
         )
-
-        exchange_tracing = False
+        
         options = (
             "    (1) Issue University Registration Credential\n"
             "    (2) Send Proof Request\n"
-            "    (2a) Send *Connectionless* Proof Request (requires a Mobile client)\n"
             "    (3) Send Message\n"
             "    (4) Create New Invitation\n"
+            "    (5) Show Pending Approvals\n"
+            "    (6) Show Connection Status\n"
+            "    (X) Exit?\n[1/2/3/4/5/6/X] "
         )
-        if uni_reg_a_agent.revocation:
-            options += (
-                "    (5) Revoke Credential\n"
-                "    (6) Publish Revocations\n"
-                "    (7) Rotate Revocation Registry\n"
-                "    (8) List Revocation Registries\n"
-            )
-        if uni_reg_a_agent.endorser_role and uni_reg_a_agent.endorser_role == "author":
-            options += "    (D) Set Endorser's DID\n"
-        if uni_reg_a_agent.multitenant:
-            options += "    (W) Create and/or Enable Wallet\n"
-        options += "    (T) Toggle tracing on credential/proof exchange\n"
-        options += "    (X) Exit?\n[1/2/3/4/{}{}T/X] ".format(
-            "5/6/7/8/" if uni_reg_a_agent.revocation else "",
-            "W/" if uni_reg_a_agent.multitenant else "",
-        )
-
+        
         async for option in prompt_loop(options):
-            if option is not None:
-                option = option.strip()
-
             if option is None or option in "xX":
                 break
-
-            elif option in "dD" and uni_reg_a_agent.endorser_role:
-                endorser_did = await prompt("Enter Endorser's DID: ")
-                await uni_reg_a_agent.agent.admin_POST(
-                    f"/transactions/{uni_reg_a_agent.agent.connection_id}/set-endorser-info",
-                    params={"endorser_did": endorser_did},
-                )
-
-            elif option in "wW" and uni_reg_a_agent.multitenant:
-                target_wallet_name = await prompt("Enter wallet name: ")
-                include_subwallet_webhook = await prompt(
-                    "(Y/N) Create sub-wallet webhook target: "
-                )
-                if include_subwallet_webhook.lower() == "y":
-                    created = await uni_reg_a_agent.agent.register_or_switch_wallet(
-                        target_wallet_name,
-                        webhook_port=uni_reg_a_agent.agent.get_new_webhook_port(),
-                        public_did=True,
-                        mediator_agent=uni_reg_a_agent.mediator_agent,
-                        endorser_agent=uni_reg_a_agent.endorser_agent,
-                        taa_accept=uni_reg_a_agent.taa_accept,
-                    )
-                else:
-                    created = await uni_reg_a_agent.agent.register_or_switch_wallet(
-                        target_wallet_name,
-                        public_did=True,
-                        mediator_agent=uni_reg_a_agent.mediator_agent,
-                        endorser_agent=uni_reg_a_agent.endorser_agent,
-                        cred_type=uni_reg_a_agent.cred_type,
-                        taa_accept=uni_reg_a_agent.taa_accept,
-                    )
-                # create a schema and cred def for the new wallet
-                # TODO check first in case we are switching between existing wallets
-                if created:
-                    # TODO this fails because the new wallet doesn't get a public DID
-                    await uni_reg_a_agent.create_schema_and_cred_def(
-                        schema_name=uni_reg_a_schema_name,
-                        schema_attrs=uni_reg_a_schema_attrs,
-                    )
-
-            elif option in "tT":
-                exchange_tracing = not exchange_tracing
-                log_msg(
-                    ">>> Credential/Proof Exchange Tracing is {}".format(
-                        "ON" if exchange_tracing else "OFF"
-                    )
-                )
-
-            elif option == "1":
-                log_status("#13 Issue university registration credential offer to student")
-
+                
+            option = option.strip()
+            
+            if option == "1":
+                if not agent.connection_id:
+                    log_msg("❌ No student connection available. Please wait for a student to connect first.")
+                    continue
+                    
+                log_status("Issue university registration credential")
+                log_msg("🔄 Sending credential offer - admin approval required before issuance")
+                
                 if uni_reg_a_agent.aip == 10:
-                    offer_request = uni_reg_a_agent.agent.generate_credential_offer(
-                        uni_reg_a_agent.aip, None, uni_reg_a_agent.cred_def_id, exchange_tracing
+                    offer_request = agent.generate_credential_offer(
+                        uni_reg_a_agent.aip, None, uni_reg_a_agent.cred_def_id, False
                     )
-                    await uni_reg_a_agent.agent.admin_POST(
-                        "/issue-credential/send-offer", offer_request
-                    )
-
+                    await agent.admin_POST("/issue-credential/send-offer", offer_request)
+                    log_msg("📨 Credential offer sent - awaiting admin approval before issuance")
                 elif uni_reg_a_agent.aip == 20:
                     if uni_reg_a_agent.cred_type == CRED_FORMAT_INDY:
-                        offer_request = uni_reg_a_agent.agent.generate_credential_offer(
+                        offer_request = agent.generate_credential_offer(
                             uni_reg_a_agent.aip,
                             uni_reg_a_agent.cred_type,
                             uni_reg_a_agent.cred_def_id,
-                            exchange_tracing,
+                            False,
                         )
-                    elif uni_reg_a_agent.cred_type == CRED_FORMAT_JSON_LD:
-                        offer_request = uni_reg_a_agent.agent.generate_credential_offer(
-                            uni_reg_a_agent.aip,
-                            uni_reg_a_agent.cred_type,
-                            None,
-                            exchange_tracing,
-                        )
-                    else:
-                        raise Exception(
-                            f"Error invalid credential type: {uni_reg_a_agent.cred_type}"
-                        )
-
-                    await uni_reg_a_agent.agent.admin_POST(
-                        "/issue-credential-2.0/send-offer", offer_request
-                    )
-                else:
-                    raise Exception(f"Error invalid AIP level: {uni_reg_a_agent.aip}")
-
+                        await agent.admin_POST("/issue-credential-2.0/send-offer", offer_request)
+                        log_msg("📨 Credential offer sent - awaiting admin approval before issuance")
+            
             elif option == "2":
-                log_status("#20 Request proof of university registration from student")
-
-                if uni_reg_a_agent.aip == 10:
-                    proof_request_web_request = (
-                        uni_reg_a_agent.agent.generate_proof_request_web_request(
-                            uni_reg_a_agent.aip,
-                            uni_reg_a_agent.cred_type,
-                            uni_reg_a_agent.revocation,
-                            exchange_tracing,
-                        )
-                    )
-                    await uni_reg_a_agent.agent.admin_POST(
-                        "/present-proof/send-request", proof_request_web_request
-                    )
-
-                elif uni_reg_a_agent.aip == 20:
-                    if uni_reg_a_agent.cred_type == CRED_FORMAT_INDY:
-                        proof_request_web_request = (
-                            uni_reg_a_agent.agent.generate_proof_request_web_request(
-                                uni_reg_a_agent.aip,
-                                uni_reg_a_agent.cred_type,
-                                uni_reg_a_agent.revocation,
-                                exchange_tracing,
-                            )
-                        )
-                    elif uni_reg_a_agent.cred_type == CRED_FORMAT_JSON_LD:
-                        proof_request_web_request = (
-                            uni_reg_a_agent.agent.generate_proof_request_web_request(
-                                uni_reg_a_agent.aip,
-                                uni_reg_a_agent.cred_type,
-                                uni_reg_a_agent.revocation,
-                                exchange_tracing,
-                            )
-                        )
-                    else:
-                        raise Exception(
-                            "Error invalid credential type:" + uni_reg_a_agent.cred_type
-                        )
-
-                    await agent.admin_POST(
-                        "/present-proof-2.0/send-request", proof_request_web_request
-                    )
-                else:
-                    raise Exception(f"Error invalid AIP level: {uni_reg_a_agent.aip}")
-
-            elif option == "2a":
-                log_status("#20 Request * Connectionless * proof of university registration from student")
-
-                if uni_reg_a_agent.aip == 10:
-                    proof_request_web_request = (
-                        uni_reg_a_agent.agent.generate_proof_request_web_request(
-                            uni_reg_a_agent.aip,
-                            uni_reg_a_agent.cred_type,
-                            uni_reg_a_agent.revocation,
-                            exchange_tracing,
-                            connectionless=True,
-                        )
-                    )
-                    proof_request = await uni_reg_a_agent.agent.admin_POST(
-                        "/present-proof/create-request", proof_request_web_request
-                    )
-                    pres_req_id = proof_request["presentation_exchange_id"]
-                    url = (
-                        os.getenv("WEBHOOK_TARGET")
-                        or (
-                            "http://"
-                            + os.getenv("DOCKERHOST").replace(
-                                "{PORT}", str(uni_reg_a_agent.agent.admin_port + 1)
-                            )
-                            + "/webhooks"
-                        )
-                    ) + f"/pres_req/{pres_req_id}/"
-                    log_msg(f"Proof request url: {url}")
-                    qr = QRCode(border=1)
-                    qr.add_data(url)
-                    log_msg(
-                        "Scan the following QR code to accept the proof request from a mobile agent."
-                    )
-                    qr.print_ascii(invert=True)
-                else:
-                    raise Exception(f"Error invalid AIP level: {uni_reg_a_agent.aip}")
-
+                log_status("Request proof of university registration")
+                # Proof request implementation here
+                log_msg("Proof request functionality not implemented yet")
+            
             elif option == "3":
+                if not agent.connection_id:
+                    log_msg("❌ No active student connection")
+                    continue
+                    
                 msg = await prompt("Enter message: ")
-                await uni_reg_a_agent.agent.admin_POST(
-                    f"/connections/{uni_reg_a_agent.agent.connection_id}/send-message",
+                await agent.admin_POST(
+                    f"/connections/{agent.connection_id}/send-message",
                     {"content": msg},
                 )
-
+                log_msg("📤 Message sent to student")
+            
             elif option == "4":
-                log_msg(
-                    "Creating a new invitation, please receive "
-                    "and accept this invitation using student agent"
-                )
+                log_msg("🔄 Creating new invitation...")
                 await uni_reg_a_agent.generate_invitation(
                     display_qr=True,
                     reuse_connections=uni_reg_a_agent.reuse_connections,
-                    multi_use_invitations=uni_reg_a_agent.multi_use_invitations,
-                    public_did_connections=uni_reg_a_agent.public_did_connections,
                     wait=True,
                 )
-
-            elif option == "5" and uni_reg_a_agent.revocation:
-                rev_reg_id = (await prompt("Enter revocation registry ID: ")).strip()
-                cred_rev_id = (await prompt("Enter credential revocation ID: ")).strip()
-                publish = (
-                    await prompt("Publish now? [Y/N]: ", default="N")
-                ).strip() in "yY"
-                # Anoncreds has different endpoints for revocation
-                is_anoncreds = False
-                if uni_reg_a_agent.agent.__dict__["wallet_type"] == "askar-anoncreds":
-                    is_anoncreds = True
-                try:
-                    endpoint = (
-                        "/anoncreds/revocation/revoke"
-                        if is_anoncreds
-                        else "/revocation/revoke"
-                    )
-                    await uni_reg_a_agent.agent.admin_POST(
-                        endpoint,
-                        {
-                            "rev_reg_id": rev_reg_id,
-                            "cred_rev_id": cred_rev_id,
-                            "publish": publish,
-                            "connection_id": uni_reg_a_agent.agent.connection_id,
-                            # leave out thread_id, let aca-py generate
-                            # "thread_id": "12345678-4444-4444-4444-123456789012",
-                            "comment": "Revocation reason goes here ...",
-                        },
-                    )
-                except ClientError:
-                    pass
-
-            elif option == "6" and uni_reg_a_agent.revocation:
-                try:
-                    endpoint = (
-                        "/anoncreds/revocation/publish-revocations"
-                        if is_anoncreds
-                        else "/revocation/publish-revocations"
-                    )
-                    resp = await uni_reg_a_agent.agent.admin_POST(endpoint, {})
-                    uni_reg_a_agent.agent.log(
-                        "Published revocations for {} revocation registr{} {}".format(
-                            len(resp["rrid2crid"]),
-                            "y" if len(resp["rrid2crid"]) == 1 else "ies",
-                            json.dumps(list(resp["rrid2crid"]), indent=4),
-                        )
-                    )
-                except ClientError:
-                    pass
-
-            elif option == "7" and uni_reg_a_agent.revocation:
-                try:
-                    endpoint = (
-                        f"/anoncreds/revocation/active-registry/{uni_reg_a_agent.cred_def_id}/rotate"
-                        if is_anoncreds
-                        else f"/revocation/active-registry/{uni_reg_a_agent.cred_def_id}/rotate"
-                    )
-                    resp = await uni_reg_a_agent.agent.admin_POST(
-                        endpoint,
-                        {},
-                    )
-                    uni_reg_a_agent.agent.log(
-                        "Rotated registries for {}. Decommissioned Registries: {}".format(
-                            uni_reg_a_agent.cred_def_id,
-                            json.dumps(list(resp["rev_reg_ids"]), indent=4),
-                        )
-                    )
-                except ClientError:
-                    pass
-
-            elif option == "8" and uni_reg_a_agent.revocation:
-                if is_anoncreds:
-                    endpoint = "/anoncreds/revocation/registries"
-                    states = [
-                        "finished",
-                        "failed",
-                        "action",
-                        "wait",
-                        "decommissioned",
-                        "full",
-                    ]
-                    default_state = "finished"
+            
+            elif option == "5":
+                if not agent.pending_approvals:
+                    log_msg("📭 No pending approvals")
                 else:
-                    endpoint = "/revocation/registries/created"
-                    states = [
-                        "init",
-                        "generated",
-                        "posted",
-                        "active",
-                        "full",
-                        "decommissioned",
-                    ]
-                    default_state = "active"
-                state = (
-                    await prompt(
-                        f"Filter by state: {states}: ",
-                        default=default_state,
-                    )
-                ).strip()
-                if state not in states:
-                    state = "active"
-                try:
-                    resp = await uni_reg_a_agent.agent.admin_GET(
-                        endpoint,
-                        params={"state": state},
-                    )
-                    uni_reg_a_agent.agent.log(
-                        "Registries (state = '{}'): {}".format(
-                            state,
-                            json.dumps(list(resp["rev_reg_ids"]), indent=4),
-                        )
-                    )
-                except ClientError:
-                    pass
-
-        if uni_reg_a_agent.show_timing:
-            timing = await uni_reg_a_agent.agent.fetch_timing()
-            if timing:
-                for line in uni_reg_a_agent.agent.format_timing(timing):
-                    log_msg(line)
-
+                    log_msg("📋 Pending approvals:")
+                    for cred_ex_id, details in agent.pending_approvals.items():
+                        log_msg(f"  🔄 {cred_ex_id}: {details['student_name']} ({details['status']})")
+            
+            elif option == "6":
+                log_msg("🔗 Connection Status:")
+                if agent.admin_connection_id:
+                    try:
+                        admin_conn = await agent.admin_GET(f"/connections/{agent.admin_connection_id}")
+                        log_msg(f"  👨‍💼 Admin: {agent.admin_connection_id} ({admin_conn['state']})")
+                    except:
+                        log_msg(f"  👨‍💼 Admin: {agent.admin_connection_id} (error retrieving status)")
+                else:
+                    log_msg("  👨‍💼 Admin: Not connected")
+                
+                if agent.connection_id:
+                    try:
+                        student_conn = await agent.admin_GET(f"/connections/{agent.connection_id}")
+                        log_msg(f"  🎓 Student: {agent.connection_id} ({student_conn['state']})")
+                    except:
+                        log_msg(f"  🎓 Student: {agent.connection_id} (error retrieving status)")
+                else:
+                    log_msg("  🎓 Student: Not connected")
+                
     finally:
         terminated = await uni_reg_a_agent.terminate()
-
-    await asyncio.sleep(0.1)
-
-    if not terminated:
-        os._exit(1)
-
+        # Small pause to let callbacks finish
+        await asyncio.sleep(0.1)
+        if not terminated:
+            # Return non-zero exit code without killing interpreter
+            import sys
+            sys.exit(1)
 
 if __name__ == "__main__":
     parser = arg_parser(ident="uni_reg_a", port=8060)
     args = parser.parse_args()
-
-    ENABLE_PYDEVD_PYCHARM = os.getenv("ENABLE_PYDEVD_PYCHARM", "").lower()
-    ENABLE_PYDEVD_PYCHARM = ENABLE_PYDEVD_PYCHARM and ENABLE_PYDEVD_PYCHARM not in (
-        "false",
-        "0",
-    )
-    PYDEVD_PYCHARM_HOST = os.getenv("PYDEVD_PYCHARM_HOST", "localhost")
-    PYDEVD_PYCHARM_CONTROLLER_PORT = int(
-        os.getenv("PYDEVD_PYCHARM_CONTROLLER_PORT", 5001)
-    )
-
-    if ENABLE_PYDEVD_PYCHARM:
-        try:
-            import pydevd_pycharm
-            print(
-                "UniRegA remote debugging to "
-                f"{PYDEVD_PYCHARM_HOST}:{PYDEVD_PYCHARM_CONTROLLER_PORT}"
-            )
-            pydevd_pycharm.settrace(
-                host=PYDEVD_PYCHARM_HOST,
-                port=PYDEVD_PYCHARM_CONTROLLER_PORT,
-                stdoutToServer=True,
-                stderrToServer=True,
-                suspend=False,
-            )
-        except ImportError:
-            print("pydevd_pycharm library was not found")
-
+    
+    loop = asyncio.get_event_loop()
     try:
-        asyncio.get_event_loop().run_until_complete(main(args))
+        loop.run_until_complete(main(args))
     except KeyboardInterrupt:
-        os._exit(1)
+        print("\n⚠️ Interrupted by user. Shutting down...")
+    finally:
+        # Cancel all remaining tasks
+        pending = asyncio.all_tasks(loop)
+        for task in pending:
+            task.cancel()
+        try:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        except Exception:
+            pass
+        # Shutdown async generators cleanly
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        # Finally close the loop
+        loop.close()
+        print("✅ Event loop closed cleanly")
