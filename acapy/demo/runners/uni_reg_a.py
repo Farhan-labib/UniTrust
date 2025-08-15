@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 import asyncio
 import datetime
 import json
@@ -11,9 +10,7 @@ import uuid
 from aiohttp import ClientError
 from aiohttp import web
 from qrcode import QRCode
-
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from runners.agent_container import (  # noqa:E402
     AriesAgent,
     arg_parser,
@@ -30,15 +27,12 @@ from runners.support.utils import (  # noqa:E402
     prompt,
     prompt_loop,
 )
-
 CRED_PREVIEW_TYPE = "https://didcomm.org/issue-credential/2.0/credential-preview"
 SELF_ATTESTED = os.getenv("SELF_ATTESTED")
 TAILS_FILE_COUNT = int(os.getenv("TAILS_FILE_COUNT", 100))
 DEMO_EXTRA_AGENT_ARGS = os.getenv("DEMO_EXTRA_AGENT_ARGS")
-
 logging.basicConfig(level=logging.WARNING)
 LOGGER = logging.getLogger(__name__)
-
 
 class UniRegAAgent(AriesAgent):
     def __init__(
@@ -69,9 +63,10 @@ class UniRegAAgent(AriesAgent):
             log_level=log_level,
             **kwargs,
         )
-        self.connection_id = None
+        self.connection_id = None  # Student/holder connection (for backward compatibility)
+        self.holder_connection_id = None  # Explicitly track holder connection
         self._connection_ready = None
-        self.admin_connection_id = None
+        self.admin_connection_id = None  # Admin connection for approvals
         self.cred_state = {}
         self.cred_attrs = {}
         self.pending_credentials = {}  
@@ -98,6 +93,16 @@ class UniRegAAgent(AriesAgent):
         # since we're using a custom message checking task
         log_msg(f"Message handler registered for {message_type} (Note: Using custom message checking)")
 
+    def get_holder_connection_id(self):
+        """Get the holder connection ID for credential issuance"""
+        if self.holder_connection_id:
+            return self.holder_connection_id
+        elif self.connection_id:
+            return self.connection_id
+        else:
+            log_msg("⚠️ No holder connection available for credential issuance")
+            return None
+
     def generate_approval_request(self, student_data):
         """Generate approval request to send to admin"""
         approval_id = str(uuid.uuid4())
@@ -115,8 +120,12 @@ class UniRegAAgent(AriesAgent):
     async def send_approval_request(self, student_data):
         """Send credential approval request to admin"""
         if not self.admin_connection_id:
-            log_msg("No connection to admin established. Cannot request approval.")
+            log_msg("❌ No connection to admin established. Cannot request approval.")
             return None
+
+        # Ensure we have a holder connection for future credential issuance
+        if not self.get_holder_connection_id():
+            log_msg("⚠️ Warning: No holder connection established yet. Credential issuance may fail later.")
             
         approval_id, request = self.generate_approval_request(student_data)
         
@@ -133,15 +142,14 @@ class UniRegAAgent(AriesAgent):
                 "status": "pending_approval"
             }
             
-            log_msg(f"Approval request sent to admin. Approval ID: {approval_id}")
+            log_msg(f"📤 Approval request sent to admin. Approval ID: {approval_id}")
             return approval_id
             
         except Exception as e:
-            log_msg(f"Error sending approval request: {e}")
+            log_msg(f"❌ Error sending approval request: {e}")
             return None
     
     # Inside UniRegAAgent
-
     async def handle_basicmessages(self, payload):
         """Handle incoming basic message webhooks"""
         try:
@@ -175,13 +183,32 @@ class UniRegAAgent(AriesAgent):
         
         if state == "active" and conn_id:
             log_msg(f"✅ Connection {conn_id} is now active")
-            # Store the first active connection as student connection
-            if not self.connection_id:
-                self.connection_id = conn_id
-                log_msg(f"Set as primary connection for credential offers")
-            # Check if this is the admin connection
-            elif self.admin_connection_id == conn_id:
-                log_msg("Admin connection is now active and ready for approval requests")
+            
+            try:
+                # Determine connection type based on context or labels
+                connection_info = await self.admin_GET(f"/connections/{conn_id}")
+                their_label = connection_info.get("their_label", "")
+                alias = connection_info.get("alias", "")
+                
+                # Check if this is an admin connection
+                if "admin" in their_label.lower() or "admin" in alias.lower():
+                    self.admin_connection_id = conn_id
+                    log_msg(f"🔧 Admin connection established: {conn_id}")
+                else:
+                    # This is a student/holder connection
+                    if not self.holder_connection_id:
+                        self.holder_connection_id = conn_id
+                        self.connection_id = conn_id  # Keep backward compatibility
+                        log_msg(f"🎓 Student/holder connection established: {conn_id}")
+                    else:
+                        log_msg(f"📝 Additional student connection: {conn_id}")
+            except Exception as e:
+                # If we can't get connection info, treat as holder connection
+                if not self.holder_connection_id:
+                    self.holder_connection_id = conn_id
+                    self.connection_id = conn_id
+                    log_msg(f"🎓 Student/holder connection established (default): {conn_id}")
+                log_msg(f"Could not determine connection type: {e}")
 
     async def handle_approval_response(self, message_data):
         """Handle approval response from admin"""
@@ -224,6 +251,12 @@ class UniRegAAgent(AriesAgent):
         if not approval_response.get("approved"):
             log_msg(f"Credential was not approved for approval ID: {approval_id}")
             return
+
+        # Ensure we have a holder connection
+        holder_conn_id = self.get_holder_connection_id()
+        if not holder_conn_id:
+            log_msg("❌ No holder connection available. Cannot issue credential.")
+            return
             
         pending_cred = self.pending_credentials[approval_id]
         student_data = pending_cred["student_data"]
@@ -232,34 +265,35 @@ class UniRegAAgent(AriesAgent):
         exchange_tracing = False  # You can make this configurable
         
         try:
-            # Use the same credential generation logic as before
+            # Use the credential generation logic with holder connection
             offer_request = self.generate_credential_offer(
                 20,  # Assuming AIP 20
                 CRED_FORMAT_INDY,  # Assuming Indy format
                 self.cred_def_id,
                 exchange_tracing,
-                student_data=student_data
+                student_data=student_data,
+                holder_connection_id=holder_conn_id  # Pass holder connection explicitly
             )
             
             await self.admin_POST(
                 "/issue-credential-2.0/send-offer", offer_request
             )
             
-            log_msg(f"Credential offer sent to student for approval ID: {approval_id}")
+            log_msg(f"✅ Credential offer sent to holder (Connection: {holder_conn_id}) for approval ID: {approval_id}")
             
             # Clean up processed credential
             del self.pending_credentials[approval_id]
             del self.approval_responses[approval_id]
             
         except Exception as e:
-            log_msg(f"Error processing approved credential: {e}")
+            log_msg(f"❌ Error processing approved credential: {e}")
 
-    def generate_credential_offer(self, aip, cred_type, cred_def_id, exchange_tracing, student_data=None):
+    def generate_credential_offer(self, aip, cred_type, cred_def_id, exchange_tracing, student_data=None, holder_connection_id=None):
         age = 22
         d = datetime.date.today()
         birth_date = datetime.date(d.year - age, d.month, d.day)
         birth_date_format = "%Y%m%d"
-
+        
         # Use provided student data or default values
         if student_data:
             cred_attrs = student_data
@@ -275,9 +309,16 @@ class UniRegAAgent(AriesAgent):
                 "timestamp": str(int(time.time())),
             }
 
+        # Determine which connection to use for credential issuance
+        target_connection_id = holder_connection_id or self.get_holder_connection_id()
+        
+        if not target_connection_id:
+            raise Exception("❌ No holder connection available for credential offer")
+            
+        log_msg(f"📋 Generating credential offer for holder connection: {target_connection_id}")
+
         if aip == 10:
             self.cred_attrs[cred_def_id] = cred_attrs
-
             cred_preview = {
                 "@type": CRED_PREVIEW_TYPE,
                 "attributes": [
@@ -286,7 +327,7 @@ class UniRegAAgent(AriesAgent):
                 ],
             }
             offer_request = {
-                "connection_id": self.connection_id,
+                "connection_id": target_connection_id,  # Use holder connection
                 "cred_def_id": cred_def_id,
                 "comment": f"University Registration offer on cred def id {cred_def_id}",
                 "auto_remove": False,
@@ -294,11 +335,9 @@ class UniRegAAgent(AriesAgent):
                 "trace": exchange_tracing,
             }
             return offer_request
-
         elif aip == 20:
             if cred_type == CRED_FORMAT_INDY:
                 self.cred_attrs[cred_def_id] = cred_attrs
-
                 cred_preview = {
                     "@type": CRED_PREVIEW_TYPE,
                     "attributes": [
@@ -307,22 +346,21 @@ class UniRegAAgent(AriesAgent):
                     ],
                 }
                 offer_request = {
-                    "connection_id": self.connection_id,
-                    "comment": f"University Registration offer on cred def id {cred_def_id}",
-                    "auto_remove": False,
-                    "credential_preview": cred_preview,
-                    "filter": {"indy": {"cred_def_id": cred_def_id}},
-                    "trace": exchange_tracing,
-                }
+                            "connection_id": target_connection_id,  # Use holder connection
+                            "comment": f"University Registration offer on cred def id {cred_def_id}",
+                            "auto_remove": False,
+                            "credential_preview": cred_preview,
+                            "filter": {"indy": {"cred_def_id": cred_def_id}},
+                            "trace": exchange_tracing,
+                        }
                 return offer_request
-
             elif cred_type == CRED_FORMAT_JSON_LD:
                 # Use student data in JSON-LD credential
                 given_name = cred_attrs.get("student_name", "JOHN").split()[0].upper()
                 family_name = cred_attrs.get("student_name", "DOE").split()[-1].upper()
                 
                 offer_request = {
-                    "connection_id": self.connection_id,
+                    "connection_id": target_connection_id,  # Use holder connection
                     "filter": {
                         "ld_proof": {
                             "credential": {
@@ -365,6 +403,9 @@ class UniRegAAgent(AriesAgent):
         birth_date = datetime.date(d.year - age, d.month, d.day)
         birth_date_format = "%Y%m%d"
 
+        # Get the holder connection for proof requests
+        target_connection_id = self.get_holder_connection_id()
+
         if aip == 10:
             req_attrs = [
                 {
@@ -395,12 +436,10 @@ class UniRegAAgent(AriesAgent):
                         "restrictions": [{"schema_name": "university registration schema"}],
                     }
                 )
-
             if SELF_ATTESTED:
                 req_attrs.append(
                     {"name": "self_attested_thing"},
                 )
-
             req_preds = [
                 {
                     "name": "birthdate_dateint",
@@ -409,7 +448,6 @@ class UniRegAAgent(AriesAgent):
                     "restrictions": [{"schema_name": "university registration schema"}],
                 }
             ]
-
             indy_proof_request = {
                 "name": "Proof of University Registration",
                 "version": "1.0",
@@ -420,18 +458,15 @@ class UniRegAAgent(AriesAgent):
                     f"0_{req_pred['name']}_GE_uuid": req_pred for req_pred in req_preds
                 },
             }
-
             if revocation:
                 indy_proof_request["non_revoked"] = {"to": int(time.time())}
-
             proof_request_web_request = {
                 "proof_request": indy_proof_request,
                 "trace": exchange_tracing,
             }
-            if not connectionless:
-                proof_request_web_request["connection_id"] = self.connection_id
+            if not connectionless and target_connection_id:
+                proof_request_web_request["connection_id"] = target_connection_id
             return proof_request_web_request
-
         elif aip == 20:
             if cred_type == CRED_FORMAT_INDY:
                 req_attrs = [
@@ -463,12 +498,10 @@ class UniRegAAgent(AriesAgent):
                             "restrictions": [{"schema_name": "university registration schema"}],
                         }
                     )
-
                 if SELF_ATTESTED:
                     req_attrs.append(
                         {"name": "self_attested_thing"},
                     )
-
                 req_preds = [
                     {
                         "name": "birthdate_dateint",
@@ -477,7 +510,6 @@ class UniRegAAgent(AriesAgent):
                         "restrictions": [{"schema_name": "university registration schema"}],
                     }
                 ]
-
                 indy_proof_request = {
                     "name": "Proof of University Registration",
                     "version": "1.0",
@@ -489,18 +521,15 @@ class UniRegAAgent(AriesAgent):
                         for req_pred in req_preds
                     },
                 }
-
                 if revocation:
                     indy_proof_request["non_revoked"] = {"to": int(time.time())}
-
                 proof_request_web_request = {
                     "presentation_request": {"indy": indy_proof_request},
                     "trace": exchange_tracing,
                 }
-                if not connectionless:
-                    proof_request_web_request["connection_id"] = self.connection_id
+                if not connectionless and target_connection_id:
+                    proof_request_web_request["connection_id"] = target_connection_id
                 return proof_request_web_request
-
             elif cred_type == CRED_FORMAT_JSON_LD:
                 proof_request_web_request = {
                     "comment": "test proof request for university registration json-ld",
@@ -558,21 +587,19 @@ class UniRegAAgent(AriesAgent):
                         }
                     },
                 }
-                if not connectionless:
-                    proof_request_web_request["connection_id"] = self.connection_id
+                if not connectionless and target_connection_id:
+                    proof_request_web_request["connection_id"] = target_connection_id
                 return proof_request_web_request
             else:
                 raise Exception(f"Error invalid credential type: {self.cred_type}")
         else:
             raise Exception(f"Error invalid AIP level: {self.aip}")
 
-
 async def main(args):
     extra_args = None
     if DEMO_EXTRA_AGENT_ARGS:
         extra_args = json.loads(DEMO_EXTRA_AGENT_ARGS)
         print("Got extra args:", extra_args)
-
     # Fix Docker networking - when running in Docker containers, set correct endpoint
     import os
     if os.path.exists("/.dockerenv"):  # We're running inside a Docker container
@@ -583,13 +610,11 @@ async def main(args):
         # Set the correct endpoint to eliminate localhost errors
         os.environ["AGENT_ENDPOINT"] = "http://172.17.0.1:8060"
         log_msg("Set RUNMODE=docker, DOCKERHOST=172.17.0.1, and AGENT_ENDPOINT for container networking")
-
     uni_reg_a_agent = await create_agent_with_args(
         args,
         ident="uni_reg_a",
         extra_args=extra_args,
     )
-
     try:
         log_status(
             "#1 Provision an agent and wallet, get back configuration details"
@@ -624,7 +649,6 @@ async def main(args):
             public_did_connections=uni_reg_a_agent.public_did_connections,
             extra_args=extra_args,
         )
-
         uni_reg_a_schema_name = "university registration schema"
         uni_reg_a_schema_attrs = [
             "student_name",
@@ -636,7 +660,6 @@ async def main(args):
             "birthdate_dateint",
             "timestamp",
         ]
-
         if uni_reg_a_agent.cred_type == CRED_FORMAT_INDY:
             uni_reg_a_agent.public_did = True
             await uni_reg_a_agent.initialize(
@@ -664,10 +687,8 @@ async def main(args):
                 log_msg(f"Set agent cred_def_id: {agent.cred_def_id}")
         else:
             raise Exception("Invalid credential type:" + uni_reg_a_agent.cred_type)
-
         # Webhook handling is automatically handled by the agent's built-in webhook server
         # The agent will call our handle_webhook method when webhooks are received
-
         # Generate an invitation for students
         await uni_reg_a_agent.generate_invitation(
             display_qr=True,
@@ -676,39 +697,8 @@ async def main(args):
             public_did_connections=uni_reg_a_agent.public_did_connections, 
             wait=False,
         )
-
-        # Set up a background task to periodically check for new messages
-        # async def poll_for_admin_messages():
-        #     """Periodically check for messages from the admin connection"""
-        #     while True:
-        #         try:
-        #             if agent.admin_connection_id:
-        #                 # Get basic messages from the connection
-        #                 resp = await agent.admin_GET(f"/connections/{agent.admin_connection_id}/send-message")
-                        
-        #                 if isinstance(resp, list) and resp:
-        #                     # Process new messages
-        #                     for msg in resp:
-        #                         if "content" in msg:
-        #                             try:
-        #                                 content = json.loads(msg["content"])
-        #                                 if content.get("type") == "credential_approval_response":
-        #                                     await agent.handle_approval_response(msg)
-        #                             except (json.JSONDecodeError, TypeError):
-        #                                 pass
-        #         except Exception as e:
-        #             log_msg(f"Error checking for admin messages: {str(e)}")
-                
-        #         # Wait before polling again
-        #         await asyncio.sleep(5)
-
-        # Start the polling task
-        # asyncio.ensure_future(poll_for_admin_messages())
         
-
-
         log_msg("Agent ready to process credential approval responses from admin")
-
         exchange_tracing = False
         options = (
             "    (1) Request Credential Approval from Admin\n"
@@ -736,21 +726,17 @@ async def main(args):
             "8/9/10/11/" if uni_reg_a_agent.revocation else "",
             "W/" if uni_reg_a_agent.multitenant else "",
         )
-
         async for option in prompt_loop(options):
             if option is not None:
                 option = option.strip()
-
             if option is None or option in "xX":
                 break
-
             elif option in "dD" and uni_reg_a_agent.endorser_role:
                 endorser_did = await prompt("Enter Endorser's DID: ")
                 await uni_reg_a_agent.agent.admin_POST(
                     f"/transactions/{uni_reg_a_agent.agent.connection_id}/set-endorser-info",
                     params={"endorser_did": endorser_did},
                 )
-
             elif option in "wW" and uni_reg_a_agent.multitenant:
                 target_wallet_name = await prompt("Enter wallet name: ")
                 include_subwallet_webhook = await prompt(
@@ -779,7 +765,6 @@ async def main(args):
                         schema_name=uni_reg_a_schema_name,
                         schema_attrs=uni_reg_a_schema_attrs,
                     )
-
             elif option in "tT":
                 exchange_tracing = not exchange_tracing
                 log_msg(
@@ -787,14 +772,12 @@ async def main(args):
                         "ON" if exchange_tracing else "OFF"
                     )
                 )
-
             elif option == "1":
                 log_status("#13 Request credential approval from admin")
                 
                 if not agent.admin_connection_id:
                     log_msg("No connection to admin established. Please use option 5 first.")
                     continue
-
                 # Collect student information
                 student_name = await prompt("Enter student name: ")
                 student_id = await prompt("Enter student ID: ")
@@ -822,10 +805,8 @@ async def main(args):
                 approval_id = await agent.send_approval_request(student_data)
                 if approval_id:
                     log_msg(f"Approval request sent. Waiting for admin response...")
-
             elif option == "2":
                 log_status("#20 Request proof of university registration from student")
-
                 if uni_reg_a_agent.aip == 10:
                     proof_request_web_request = (
                         agent.generate_proof_request_web_request(
@@ -838,7 +819,6 @@ async def main(args):
                     await agent.admin_POST(
                         "/present-proof/send-request", proof_request_web_request
                     )
-
                 elif uni_reg_a_agent.aip == 20:
                     if uni_reg_a_agent.cred_type == CRED_FORMAT_INDY:
                         proof_request_web_request = (
@@ -862,16 +842,13 @@ async def main(args):
                         raise Exception(
                             "Error invalid credential type:" + uni_reg_a_agent.cred_type
                         )
-
                     await agent.admin_POST(
                         "/present-proof-2.0/send-request", proof_request_web_request
                     )
                 else:
                     raise Exception(f"Error invalid AIP level: {uni_reg_a_agent.aip}")
-
             elif option == "2a":
                 log_status("#20 Request * Connectionless * proof of university registration from student")
-
                 if uni_reg_a_agent.aip == 10:
                     proof_request_web_request = (
                         agent.generate_proof_request_web_request(
@@ -905,17 +882,15 @@ async def main(args):
                     qr.print_ascii(invert=True)
                 else:
                     raise Exception(f"Error invalid AIP level: {uni_reg_a_agent.aip}")
-
             elif option == "3":
                 msg = await prompt("Enter message: ")
-                if agent.connection_id:
+                if agent.get_holder_connection_id():
                     await agent.admin_POST(
-                        f"/connections/{agent.connection_id}/send-message",
+                        f"/connections/{agent.get_holder_connection_id()}/send-message",
                         {"content": msg},
                     )
                 else:
                     log_msg("No student connection established.")
-
             elif option == "4":
                 log_msg(
                     "Creating a new invitation, please receive "
@@ -928,14 +903,12 @@ async def main(args):
                     public_did_connections=uni_reg_a_agent.public_did_connections,
                     wait=True,
                 )
-
             elif option == "5":
                 log_msg("Please provide admin agent invitation")
                 log_msg("Paste the admin invitation JSON and press Enter:")
                 
                 invitation_json = await prompt("")
                 invitation_json = invitation_json.strip().replace("\n", "").replace("\r", "")
-
                 try:
                     # Parse and validate the invitation
                     invitation = json.loads(invitation_json)
@@ -1018,7 +991,6 @@ async def main(args):
                     log_msg("2. Check that admin agent shows 'Admin agent started' message")
                     log_msg("3. Verify admin agent is using --port 8070")
                     log_msg("4. Try restarting admin agent if needed")
-
             elif option == "6":
                 # Process approved credentials
                 approved_credentials = [
@@ -1038,7 +1010,6 @@ async def main(args):
                 
                 approval_id = await prompt("Enter approval ID to process: ")
                 await agent.process_approved_credential(approval_id)
-
             elif option == "7":
                 # List pending approvals
                 if not agent.pending_credentials:
@@ -1054,7 +1025,6 @@ async def main(args):
                         log_msg(f"Request Time: {request_time}")
                         log_msg(f"Student: {student_data.get('student_name')} ({student_data.get('student_id')})")
                         log_msg(f"Program: {student_data.get('program')}")
-
             elif option == "8" and uni_reg_a_agent.revocation:
                 rev_reg_id = (await prompt("Enter revocation registry ID: ")).strip()
                 cred_rev_id = (await prompt("Enter credential revocation ID: ")).strip()
@@ -1077,13 +1047,12 @@ async def main(args):
                             "rev_reg_id": rev_reg_id,
                             "cred_rev_id": cred_rev_id,
                             "publish": publish,
-                            "connection_id": agent.connection_id,
+                            "connection_id": agent.get_holder_connection_id(),
                             "comment": "Revocation reason goes here ...",
                         },
                     )
                 except ClientError:
                     pass
-
             elif option == "9" and uni_reg_a_agent.revocation:
                 try:
                     is_anoncreds = agent.__dict__["wallet_type"] == "askar-anoncreds"
@@ -1102,7 +1071,6 @@ async def main(args):
                     )
                 except ClientError:
                     pass
-
             elif option == "10" and uni_reg_a_agent.revocation:
                 try:
                     is_anoncreds = agent.__dict__["wallet_type"] == "askar-anoncreds"
@@ -1120,7 +1088,6 @@ async def main(args):
                     )
                 except ClientError:
                     pass
-
             elif option == "11" and uni_reg_a_agent.revocation:
                 is_anoncreds = agent.__dict__["wallet_type"] == "askar-anoncreds"
                 if is_anoncreds:
@@ -1166,26 +1133,20 @@ async def main(args):
                     )
                 except ClientError:
                     pass
-
         if uni_reg_a_agent.show_timing:
             timing = await agent.fetch_timing()
             if timing:
                 for line in agent.format_timing(timing):
                     log_msg(line)
-
     finally:
         terminated = await uni_reg_a_agent.terminate()
-
     await asyncio.sleep(0.1)
-
     if not terminated:
         os._exit(1)
-
 
 if __name__ == "__main__":
     parser = arg_parser(ident="uni_reg_a", port=8060)
     args = parser.parse_args()
-
     ENABLE_PYDEVD_PYCHARM = os.getenv("ENABLE_PYDEVD_PYCHARM", "").lower()
     ENABLE_PYDEVD_PYCHARM = ENABLE_PYDEVD_PYCHARM and ENABLE_PYDEVD_PYCHARM not in (
         "false",
@@ -1195,7 +1156,6 @@ if __name__ == "__main__":
     PYDEVD_PYCHARM_CONTROLLER_PORT = int(
         os.getenv("PYDEVD_PYCHARM_CONTROLLER_PORT", 5001)
     )
-
     if ENABLE_PYDEVD_PYCHARM:
         try:
             import pydevd_pycharm
@@ -1212,7 +1172,6 @@ if __name__ == "__main__":
             )
         except ImportError:
             print("pydevd_pycharm library was not found")
-
     try:
         asyncio.get_event_loop().run_until_complete(main(args))
     except KeyboardInterrupt:
