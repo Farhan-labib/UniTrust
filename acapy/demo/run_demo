@@ -113,7 +113,7 @@ do
     continue
   ;;
   --bg)
-    if [ "${AGENT}" = "alice" ] || [ "${AGENT}" = "faber" ] || [ "${AGENT}" = "acme" ] || [ "${AGENT}" = "uni_reg_a" ]; then
+    if [ "${AGENT}" = "alice" ] || [ "${AGENT}" = "faber" ] || [ "${AGENT}" = "acme" ] || [ "${AGENT}" = "uni_reg_a" ] || [ "${AGENT}" = "uni_admin_a" ]; then
       DOCKER_OPTS="-d"
       echo -e "\nRunning in ${AGENT} in the background. Note that you cannot use the command line console in this mode."
       echo To see the logs use: \"docker logs ${AGENT}\".
@@ -121,7 +121,7 @@ do
       echo To stop the agent, use: \"docker stop ${AGENT}\". The docker environment will
       echo -e "be removed on stop.\n\n"
     else
-      echo The "bg" option \(for running docker in detached mode\) is only for agents Alice, Faber, Acme, and UniRegA.
+      echo The "bg" option \(for running docker in detached mode\) is only for agents Alice, Faber, Acme, UniRegA, and UniAdminA.
       echo Ignoring...
     fi
     continue
@@ -131,7 +131,7 @@ do
 Usage:
    ./demo_run <resolution> <agent> [OPTIONS]
    - <resolution> is one of the docker option to build or run.
-   - <agent> is one of alice, faber, acme, uni_reg_a, performance.
+   - <agent> is one of alice, faber, acme, uni_reg_a, uni_admin_a, performance.
    - Options:
       --events - display on the terminal the webhook events from the ACA-Py agent.
       --timing - at the end of the run, display timing; relevant to the "performance" agent.
@@ -177,12 +177,16 @@ elif [ "$AGENT" = "uni_reg_a" ]; then
   AGENT_MODULE="uni_reg_a"
   AGENT_PORT=8060
   AGENT_PORT_RANGE=8060-8069
+elif [ "$AGENT" = "uni_admin_a" ]; then
+  AGENT_MODULE="uni_admin_a"
+  AGENT_PORT=8070
+  AGENT_PORT_RANGE=8070-8079
 elif [ "$AGENT" = "performance" ]; then
   AGENT_MODULE="performance"
   AGENT_PORT=8050
   AGENT_PORT_RANGE=8050-8069
 else
-  echo "Please specify which agent you want to run. Choose from 'faber', 'alice', 'acme', 'uni_reg_a', or 'performance'."
+  echo "Please specify which agent you want to run. Choose from 'faber', 'alice', 'acme', 'uni_reg_a', 'uni_admin_a', or 'performance'."
   exit 1
 fi
 
