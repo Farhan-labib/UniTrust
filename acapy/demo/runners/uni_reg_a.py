@@ -292,46 +292,53 @@ class UniRegAAgent(AriesAgent):
         elif event["topic"] == "issue_credential_v2_0":
             await self.handle_issue_credential_v2_0(event["payload"])
 
-    async def handle_admin_message(self, content):
+    async def handle_admin_message(self, message):
+        """
+        Handle admin messages such as approval responses.
+        """
         try:
-            data = json.loads(content)
-            if data.get("type") == "approval_response" and data["approved"]:
-                cred_ex_id = data["cred_ex_id"]
-                api_version = data.get("api_version", "v1")
-                
-                if cred_ex_id in self.pending_approvals:
-                    log_msg(f"✅ Received approval for exchange ID: {cred_ex_id}")
-                    
-                    # Issue the credential based on API version
-                    try:
-                        if api_version == "v2":
-                            await self.admin_POST(
-                                f"/issue-credential-2.0/records/{cred_ex_id}/issue",
-                                {"comment": "Approved by University Admin"}
-                            )
-                        else:
-                            await self.admin_POST(
-                                f"/issue-credential/records/{cred_ex_id}/issue",
-                                {"comment": "Approved by University Admin"}
-                            )
-                        
-                        del self.pending_approvals[cred_ex_id]
-                        log_msg(f"✅ Credential issued for exchange ID: {cred_ex_id}")
-                        
-                    except Exception as e:
-                        log_msg(f"❌ Error issuing credential: {str(e)}")
-                        
-            elif data.get("type") == "approval_response" and not data["approved"]:
-                cred_ex_id = data["cred_ex_id"]
-                reason = data.get("reason", "Denied by admin")
-                
-                if cred_ex_id in self.pending_approvals:
-                    log_msg(f"❌ Credential denied for exchange ID: {cred_ex_id}")
-                    log_msg(f"   Reason: {reason}")
-                    del self.pending_approvals[cred_ex_id]
-                    
-        except json.JSONDecodeError:
-            pass
+            data = json.loads(message)
+        except Exception as e:
+            log_msg(f"❌ Failed to parse admin message as JSON: {str(e)}")
+            return
+
+        # Handle approval response
+        if data.get("type") == "approval_response" and data.get("approved"):
+            cred_ex_id = data.get("cred_ex_id")
+            api_version = data.get("api_version", "v1")
+
+            log_msg(f"🔍 Approval received for cred_ex_id={cred_ex_id}, api_version={api_version}")
+
+            if cred_ex_id in self.pending_approvals:
+                try:
+                    # Issue credential based on API version
+                    if api_version == "v2":
+                        log_msg(f"📤 Sending issue request to /issue-credential-2.0/records/{cred_ex_id}/issue")
+                        await self.admin_POST(f"/issue-credential-2.0/records/{cred_ex_id}/issue")
+                    else:
+                        log_msg(f"📤 Sending issue request to /issue-credential/records/{cred_ex_id}/issue")
+                        await self.admin_POST(
+                            f"/issue-credential/records/{cred_ex_id}/issue",
+                            {"comment": "Credential issued after admin approval"}
+                        )
+
+                    log_msg(f"✅ Credential issued successfully for cred_ex_id={cred_ex_id}")
+                    del self.pending_approvals[cred_ex_id]  # Remove from queue
+
+                except Exception as e:
+                    log_msg(f"❌ Error issuing credential for {cred_ex_id}: {str(e)}")
+            else:
+                log_msg(f"⚠️ Received approval for unknown cred_ex_id={cred_ex_id}")
+
+        elif data.get("type") == "approval_response" and not data.get("approved"):
+            cred_ex_id = data.get("cred_ex_id")
+            log_msg(f"❌ Approval denied for cred_ex_id={cred_ex_id}")
+            if cred_ex_id in self.pending_approvals:
+                del self.pending_approvals[cred_ex_id]
+
+        else:
+            log_msg(f"ℹ️ Unknown admin message type: {data}")
+
 
     async def send_approval_request(self, cred_ex_id, student_name, api_topic):
         if not self.admin_connection_id:
@@ -560,26 +567,27 @@ async def main(args):
                 if not agent.connection_id:
                     log_msg("❌ No student connection available. Please wait for a student to connect first.")
                     continue
-                    
+
                 log_status("Issue university registration credential")
                 log_msg("🔄 Sending credential offer - admin approval required before issuance")
-                
-                if uni_reg_a_agent.aip == 10:
+
+                # Only send the offer if we haven't already sent one
+                if not hasattr(agent, "last_offer_ex_id"):
                     offer_request = agent.generate_credential_offer(
-                        uni_reg_a_agent.aip, None, uni_reg_a_agent.cred_def_id, False
+                        uni_reg_a_agent.aip,
+                        uni_reg_a_agent.cred_type,
+                        uni_reg_a_agent.cred_def_id,
+                        False,
                     )
-                    await agent.admin_POST("/issue-credential/send-offer", offer_request)
-                    log_msg("📨 Credential offer sent - awaiting admin approval before issuance")
-                elif uni_reg_a_agent.aip == 20:
-                    if uni_reg_a_agent.cred_type == CRED_FORMAT_INDY:
-                        offer_request = agent.generate_credential_offer(
-                            uni_reg_a_agent.aip,
-                            uni_reg_a_agent.cred_type,
-                            uni_reg_a_agent.cred_def_id,
-                            False,
-                        )
-                        await agent.admin_POST("/issue-credential-2.0/send-offer", offer_request)
-                        log_msg("📨 Credential offer sent - awaiting admin approval before issuance")
+                    response = await agent.admin_POST("/issue-credential-2.0/send-offer", offer_request)
+                    
+                    # Store the cred_ex_id for later
+                    agent.last_offer_ex_id = response["cred_ex_id"]
+                    log_msg(f"📨 Credential offer sent - Exchange ID: {agent.last_offer_ex_id}")
+                    log_msg("Awaiting admin approval before issuance...")
+                else:
+                    log_msg(f"⚠️ Offer already sent with cred_ex_id={agent.last_offer_ex_id}")
+
             
             elif option == "2":
                 log_status("Request proof of university registration")
