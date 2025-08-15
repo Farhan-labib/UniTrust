@@ -61,8 +61,7 @@ class UniAdminAAgent(AriesAgent):
         self.cred_state = {}
         self.approval_queue = {}
         self.registrar_connection_id = None
-        
-        # Debug: Print initialization
+
         log_msg("🔍 DEBUG: UniAdminAAgent initialized with empty approval_queue")
 
     async def detect_connection(self):
@@ -74,75 +73,71 @@ class UniAdminAAgent(AriesAgent):
         return self._connection_ready.done() and self._connection_ready.result()
 
     async def handle_connections(self, message):
-        """Handle connection state changes"""
         connection_id = message["connection_id"]
-        state = message["state"]
-        
-        self.log(f"Connection {connection_id} in state {state}")
-        
-        if state in ("active", "response"):
-            log_msg(f"🔗 Connection established: {connection_id}")
-            if not self.connection_id:
-                self.connection_id = connection_id
-            
-            # Mark connection as ready
-            if not self._connection_ready.done():
-                self._connection_ready.set_result(True)
+        their_label = message.get("their_label", "Unknown")
 
-    async def handle_events(self, event):
-        log_msg(f"🔍 DEBUG: Received event - Topic: {event['topic']}")
-        
-        if event["topic"] == "connections":
-            await self.handle_connections(event["payload"])
-        elif event["topic"] == "basicmessages":
-            msg = event["payload"]
-            connection_id = msg["connection_id"]
-            content = msg["content"]
-            
-            log_msg(f"🔍 DEBUG: Basic message from {connection_id}")
-            log_msg(f"🔍 DEBUG: Message content: {content}")
-            
-            try:
+        if not hasattr(self, "connection_labels"):
+            self.connection_labels = {}
+
+        self.connection_labels[connection_id] = their_label
+
+        await super().handle_connections(message)
+
+
+    async def handle_basicmessages(self, message):
+        connection_id = message["connection_id"]
+        content = message["content"]
+
+        log_msg(f"🔍 DEBUG: Basic message from {connection_id}")
+        log_msg(f"🔍 DEBUG: Message content: {content}")
+
+        # Keep a mapping of connection_id → label
+        if not hasattr(self, "connection_labels"):
+            self.connection_labels = {}
+
+        # Lookup label if we have it
+        label = self.connection_labels.get(connection_id, "Unknown")
+
+        try:
+            # Try JSON parse only if it looks like JSON
+            if isinstance(content, str) and content.strip().startswith("{"):
                 data = json.loads(content)
-                log_msg(f"🔍 DEBUG: Parsed JSON successfully: {data}")
-                
                 if data.get("type") == "approval_request":
-                    log_msg("🔍 DEBUG: Found approval_request type - calling handler")
                     await self.handle_approval_request(data, connection_id)
-                else:
-                    log_msg(f"🔍 DEBUG: Message type '{data.get('type')}' is not approval_request")
-                    
-            except json.JSONDecodeError as e:
-                log_msg(f"🔍 DEBUG: JSON decode failed: {str(e)}")
-                log_msg(f"🔍 DEBUG: Raw content was: {repr(content)}")
-        else:
-            log_msg(f"🔍 DEBUG: Unhandled event topic: {event['topic']}")
+            else:
+                # Just a plain text message
+                log_msg(f"📨 Plain message from {label}: {content}")
+
+        except Exception as e:
+            log_msg(f"❌ Error parsing basicmessage: {str(e)}")
+            log_msg(f"🔍 DEBUG: Raw content was: {content}")
+
 
     async def handle_approval_request(self, data, connection_id):
         log_msg("🔍 DEBUG: handle_approval_request called")
         log_msg(f"🔍 DEBUG: Data received: {data}")
         log_msg(f"🔍 DEBUG: Connection ID: {connection_id}")
-        
+
         cred_ex_id = data["cred_ex_id"]
         student_name = data["student_name"]
         api_version = data.get("api_version", "v1")
-        
+
         log_msg(f"🔍 DEBUG: Extracted - cred_ex_id: {cred_ex_id}, student: {student_name}, api: {api_version}")
         log_msg(f"🔍 DEBUG: Current approval_queue before adding: {list(self.approval_queue.keys())}")
-        
+
+        # ✅ Store request
         self.approval_queue[cred_ex_id] = {
             "student_name": student_name,
             "connection_id": connection_id,
             "status": "pending",
             "api_version": api_version
         }
-        
+
         log_msg(f"📥 Approval request received for student: {student_name}")
         log_msg(f"🔑 Credential exchange ID: {cred_ex_id}")
         log_msg(f"📱 API version: {api_version}")
         log_msg(f"✅ Request added to approval queue. Total requests: {len(self.approval_queue)}")
-        
-        # Debug: Print the current approval queue
+
         log_msg("🔍 DEBUG: Current approval_queue contents:")
         for k, v in self.approval_queue.items():
             log_msg(f"  {k}: {v}")
@@ -151,11 +146,11 @@ class UniAdminAAgent(AriesAgent):
         if cred_ex_id not in self.approval_queue:
             log_msg("❌ Invalid credential exchange ID")
             return
-            
+
         request = self.approval_queue[cred_ex_id]
         connection_id = request["connection_id"]
         api_version = request.get("api_version", "v1")
-        
+
         await self.admin_POST(
             f"/connections/{connection_id}/send-message",
             {
@@ -167,7 +162,7 @@ class UniAdminAAgent(AriesAgent):
                 })
             }
         )
-        
+
         self.approval_queue[cred_ex_id]["status"] = "approved"
         log_msg(f"✅ Approved credential for: {request['student_name']}")
 
@@ -175,11 +170,11 @@ class UniAdminAAgent(AriesAgent):
         if cred_ex_id not in self.approval_queue:
             log_msg("❌ Invalid credential exchange ID")
             return
-            
+
         request = self.approval_queue[cred_ex_id]
         connection_id = request["connection_id"]
         api_version = request.get("api_version", "v1")
-        
+
         await self.admin_POST(
             f"/connections/{connection_id}/send-message",
             {
@@ -192,10 +187,11 @@ class UniAdminAAgent(AriesAgent):
                 })
             }
         )
-        
+
         self.approval_queue[cred_ex_id]["status"] = "denied"
         log_msg(f"❌ Denied credential for: {request['student_name']}")
         log_msg(f"   Reason: {reason}")
+
 
 async def main(args):
     extra_args = None
@@ -296,8 +292,9 @@ async def main(args):
                 break
                 
             option = option.strip()
-            
+
             if option == "1":
+                log_msg( agent.approval_queue)
                 if not agent.approval_queue:
                     log_msg("📭 No pending approvals")
                     continue
