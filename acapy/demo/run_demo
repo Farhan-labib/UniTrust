@@ -181,12 +181,17 @@ elif [ "$AGENT" = "uni_admin_a" ]; then
   AGENT_MODULE="uni_admin_a"
   AGENT_PORT=8070
   AGENT_PORT_RANGE=8070-8079
+elif [ "$AGENT" = "company_a" ]; then
+  AGENT_MODULE="company_a"
+  AGENT_PORT=8080
+  AGENT_PORT_RANGE=8080-8089
 elif [ "$AGENT" = "performance" ]; then
   AGENT_MODULE="performance"
   AGENT_PORT=8050
   AGENT_PORT_RANGE=8050-8069
+  
 else
-  echo "Please specify which agent you want to run. Choose from 'faber', 'alice', 'acme', 'uni_reg_a', 'uni_admin_a', or 'performance'."
+  echo "Please specify which agent you want to run. Choose from 'faber', 'alice', 'acme', 'uni_reg_a', 'uni_admin_a', 'company_a', or 'performance'."
   exit 1
 fi
 
