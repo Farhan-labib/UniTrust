@@ -232,10 +232,9 @@ class UniAdminAgent(AriesAgent):
                 log_msg(f"Approval ID: {approval_id}")
                 log_msg(f"From connection: {connection_id}")
                 log_msg(f"Student Name: {student_data.get('student_name', 'N/A')}")
-                log_msg(f"Student ID: {student_data.get('student_id', 'N/A')}")
-                log_msg(f"Program: {student_data.get('program', 'N/A')}")
-                log_msg(f"Year: {student_data.get('year', 'N/A')}")
-                log_msg(f"GPA: {student_data.get('gpa', 'N/A')}")
+                log_msg(f"University: {student_data.get('university_name', 'N/A')}")
+                log_msg(f"Graduation Year: {student_data.get('graduation_year', 'N/A')}")
+                log_msg(f"CGPA: {student_data.get('cgpa', 'N/A')}")
                 log_msg("=== Use option '1' to approve or '2' to reject ===\n")
             else:
                 log_msg(f"Message is not a credential approval request")
@@ -475,8 +474,8 @@ async def main(args):
                     student_data = data["student_data"]
                     log_msg(f"ID: {approval_id}")
                     log_msg(f"  Student: {student_data.get('student_name', 'N/A')}")
-                    log_msg(f"  Program: {student_data.get('program', 'N/A')}")
-                    log_msg(f"  Student ID: {student_data.get('student_id', 'N/A')}")
+                    log_msg(f"  University: {student_data.get('university_name', 'N/A')}")
+                    log_msg(f"  Graduation Year: {student_data.get('graduation_year', 'N/A')}")
                     log_msg("")
                 
                 approval_id = await prompt("Enter approval ID to approve: ")
@@ -495,8 +494,8 @@ async def main(args):
                     student_data = data["student_data"]
                     log_msg(f"ID: {approval_id}")
                     log_msg(f"  Student: {student_data.get('student_name', 'N/A')}")
-                    log_msg(f"  Program: {student_data.get('program', 'N/A')}")
-                    log_msg(f"  Student ID: {student_data.get('student_id', 'N/A')}")
+                    log_msg(f"  University: {student_data.get('university_name', 'N/A')}")
+                    log_msg(f"  Graduation Year: {student_data.get('graduation_year', 'N/A')}")
                     log_msg("")
                 
                 approval_id = await prompt("Enter approval ID to reject: ")
@@ -516,10 +515,9 @@ async def main(args):
                         log_msg(f"\nApproval ID: {approval_id}")
                         log_msg(f"Request Time: {request_time}")
                         log_msg(f"Student Name: {student_data.get('student_name', 'N/A')}")
-                        log_msg(f"Student ID: {student_data.get('student_id', 'N/A')}")
-                        log_msg(f"Program: {student_data.get('program', 'N/A')}")
-                        log_msg(f"Year: {student_data.get('year', 'N/A')}")
-                        log_msg(f"GPA: {student_data.get('gpa', 'N/A')}")
+                        log_msg(f"University: {student_data.get('university_name', 'N/A')}")
+                        log_msg(f"Graduation Year: {student_data.get('graduation_year', 'N/A')}")
+                        log_msg(f"CGPA: {student_data.get('cgpa', 'N/A')}")
 
             elif option == "4":
                 # Send message to registrar

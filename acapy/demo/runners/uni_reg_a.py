@@ -289,24 +289,15 @@ class UniRegAAgent(AriesAgent):
             log_msg(f"❌ Error processing approved credential: {e}")
 
     def generate_credential_offer(self, aip, cred_type, cred_def_id, exchange_tracing, student_data=None, holder_connection_id=None):
-        age = 22
-        d = datetime.date.today()
-        birth_date = datetime.date(d.year - age, d.month, d.day)
-        birth_date_format = "%Y%m%d"
-        
         # Use provided student data or default values
         if student_data:
             cred_attrs = student_data
         else:
             cred_attrs = {
                 "student_name": "John Doe",
-                "student_id": "STU123456",
-                "enrollment_date": "2022-09-01",
-                "program": "Computer Science",
-                "year": "3",
-                "gpa": "3.75",
-                "birthdate_dateint": birth_date.strftime(birth_date_format),
-                "timestamp": str(int(time.time())),
+                "university_name": "Demo University",
+                "graduation_year": "2024",
+                "cgpa": "3.75",
             }
 
         # Determine which connection to use for credential issuance
@@ -380,9 +371,9 @@ class UniRegAAgent(AriesAgent):
                                     "type": ["UniversityStudent"],
                                     "givenName": given_name,
                                     "familyName": family_name,
-                                    "studentId": cred_attrs.get("student_id", "STU123456"),
-                                    "program": cred_attrs.get("program", "Computer Science"),
-                                    "enrollmentDate": cred_attrs.get("enrollment_date", "2022-09-01"),
+                                    "universityName": cred_attrs.get("university_name", "Demo University"),
+                                    "graduationYear": cred_attrs.get("graduation_year", "2024"),
+                                    "cgpa": cred_attrs.get("cgpa", "3.75"),
                                 },
                             },
                             "options": {"proofType": SIG_TYPE_BLS},
@@ -398,11 +389,6 @@ class UniRegAAgent(AriesAgent):
     def generate_proof_request_web_request(
         self, aip, cred_type, revocation, exchange_tracing, connectionless=False
     ):
-        age = 18
-        d = datetime.date.today()
-        birth_date = datetime.date(d.year - age, d.month, d.day)
-        birth_date_format = "%Y%m%d"
-
         # Get the holder connection for proof requests
         target_connection_id = self.get_holder_connection_id()
 
@@ -413,18 +399,18 @@ class UniRegAAgent(AriesAgent):
                     "restrictions": [{"schema_name": "university registration schema"}],
                 },
                 {
-                    "name": "student_id",
+                    "name": "university_name",
                     "restrictions": [{"schema_name": "university registration schema"}],
                 },
                 {
-                    "name": "program",
+                    "name": "graduation_year",
                     "restrictions": [{"schema_name": "university registration schema"}],
                 },
             ]
             if revocation:
                 req_attrs.append(
                     {
-                        "name": "enrollment_date",
+                        "name": "cgpa",
                         "restrictions": [{"schema_name": "university registration schema"}],
                         "non_revoked": {"to": int(time.time() - 1)},
                     },
@@ -432,7 +418,7 @@ class UniRegAAgent(AriesAgent):
             else:
                 req_attrs.append(
                     {
-                        "name": "enrollment_date",
+                        "name": "cgpa",
                         "restrictions": [{"schema_name": "university registration schema"}],
                     }
                 )
@@ -440,14 +426,7 @@ class UniRegAAgent(AriesAgent):
                 req_attrs.append(
                     {"name": "self_attested_thing"},
                 )
-            req_preds = [
-                {
-                    "name": "birthdate_dateint",
-                    "p_type": "<=",
-                    "p_value": int(birth_date.strftime(birth_date_format)),
-                    "restrictions": [{"schema_name": "university registration schema"}],
-                }
-            ]
+            req_preds = []
             indy_proof_request = {
                 "name": "Proof of University Registration",
                 "version": "1.0",
@@ -475,18 +454,18 @@ class UniRegAAgent(AriesAgent):
                         "restrictions": [{"schema_name": "university registration schema"}],
                     },
                     {
-                        "name": "student_id",
+                        "name": "university_name",
                         "restrictions": [{"schema_name": "university registration schema"}],
                     },
                     {
-                        "name": "program",
+                        "name": "graduation_year",
                         "restrictions": [{"schema_name": "university registration schema"}],
                     },
                 ]
                 if revocation:
                     req_attrs.append(
                         {
-                            "name": "enrollment_date",
+                            "name": "cgpa",
                             "restrictions": [{"schema_name": "university registration schema"}],
                             "non_revoked": {"to": int(time.time() - 1)},
                         },
@@ -494,7 +473,7 @@ class UniRegAAgent(AriesAgent):
                 else:
                     req_attrs.append(
                         {
-                            "name": "enrollment_date",
+                            "name": "cgpa",
                             "restrictions": [{"schema_name": "university registration schema"}],
                         }
                     )
@@ -502,14 +481,7 @@ class UniRegAAgent(AriesAgent):
                     req_attrs.append(
                         {"name": "self_attested_thing"},
                     )
-                req_preds = [
-                    {
-                        "name": "birthdate_dateint",
-                        "p_type": "<=",
-                        "p_value": int(birth_date.strftime(birth_date_format)),
-                        "restrictions": [{"schema_name": "university registration schema"}],
-                    }
-                ]
+                req_preds = []
                 indy_proof_request = {
                     "name": "Proof of University Registration",
                     "version": "1.0",
@@ -652,13 +624,9 @@ async def main(args):
         uni_reg_a_schema_name = "university registration schema"
         uni_reg_a_schema_attrs = [
             "student_name",
-            "student_id",
-            "enrollment_date",
-            "program",
-            "year",
-            "gpa",
-            "birthdate_dateint",
-            "timestamp",
+            "university_name",
+            "graduation_year",
+            "cgpa",
         ]
         if uni_reg_a_agent.cred_type == CRED_FORMAT_INDY:
             uni_reg_a_agent.public_did = True
@@ -780,26 +748,15 @@ async def main(args):
                     continue
                 # Collect student information
                 student_name = await prompt("Enter student name: ")
-                student_id = await prompt("Enter student ID: ")
-                program = await prompt("Enter program: ")
-                year = await prompt("Enter year: ")
-                gpa = await prompt("Enter GPA: ")
-                enrollment_date = await prompt("Enter enrollment date (YYYY-MM-DD): ")
-                
-                age = 22
-                d = datetime.date.today()
-                birth_date = datetime.date(d.year - age, d.month, d.day)
-                birth_date_format = "%Y%m%d"
+                university_name = await prompt("Enter university name: ")
+                graduation_year = await prompt("Enter graduation year: ")
+                cgpa = await prompt("Enter CGPA: ")
                 
                 student_data = {
                     "student_name": student_name,
-                    "student_id": student_id,
-                    "enrollment_date": enrollment_date,
-                    "program": program,
-                    "year": year,
-                    "gpa": gpa,
-                    "birthdate_dateint": birth_date.strftime(birth_date_format),
-                    "timestamp": str(int(time.time())),
+                    "university_name": university_name,
+                    "graduation_year": graduation_year,
+                    "cgpa": cgpa,
                 }
                 
                 approval_id = await agent.send_approval_request(student_data)
