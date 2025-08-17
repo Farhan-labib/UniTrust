@@ -17,6 +17,7 @@ shift  # Shift again to remove AGENT from the arguments
 ARGS=""
 TRACE_ENABLED=""
 TRACE_TAG=acapy.events
+
 if ! [ -z "$TRACE_TARGET_URL" ]; then
   TRACE_TARGET=http://${TRACE_TARGET_URL}/
 else
@@ -24,6 +25,7 @@ else
 fi
 
 WEBHOOK_TARGET=""
+
 if [ -z "$DOCKER_NET" ]; then
   DOCKER_NET="bridge"
 fi
@@ -48,10 +50,12 @@ do
     mkdir ../log && chmod -R uga+rws ../log
     DOCKER_VOL="${DOCKER_VOL} -v /$(pwd)/../log:/home/aries/log"
   fi
+
   if [ ! -z "$SKIP" ]; then
     SKIP=""
     continue
   fi
+
   case $i in
   --events)
     if [ "${AGENT}" = "performance" ]; then
@@ -108,15 +112,15 @@ do
     continue
   ;;
   --bg)
-    if [ "${AGENT}" = "alice" ] || [ "${AGENT}" = "faber" ] || [ "${AGENT}" = "acme" ] || [ "${AGENT}" = "uni_reg_a" ] || [ "${AGENT}" = "uni_admin_a" ] || [ "${AGENT}" = "uni_reg_b" ] || [ "${AGENT}" = "uni_admin_b" ]; then
+    if [ "${AGENT}" = "alice" ] || [ "${AGENT}" = "faber" ] || [ "${AGENT}" = "acme" ] || [ "${AGENT}" = "uni_reg_a" ] || [ "${AGENT}" = "uni_admin_a" ] || [ "${AGENT}" = "uni_reg_b" ] || [ "${AGENT}" = "uni_admin_b" ] || [ "${AGENT}" = "uni_reg_c" ] || [ "${AGENT}" = "uni_admin_c" ]; then
       DOCKER_OPTS="-d"
-      echo -e "\nRunning in ${AGENT} in the background. Note that you cannot use the command line console in this mode."
+      echo -e "\nRunning ${AGENT} in the background. Note that you cannot use the command line console in this mode."
       echo To see the logs use: \"docker logs ${AGENT}\".
       echo While viewing logs, hit CTRL-C to return to the command line.
       echo To stop the agent, use: \"docker stop ${AGENT}\". The docker environment will
       echo -e "be removed on stop.\n\n"
     else
-      echo The "bg" option \(for running docker in detached mode\) is only for agents Alice, Faber, Acme, UniRegA, UniAdminA, UniRegB, and UniAdminB.
+      echo The "bg" option \(for running docker in detached mode\) is only for agents Alice, Faber, Acme, UniRegA, UniAdminA, UniRegB, UniAdminB, UniRegC, and UniAdminC.
       echo Ignoring...
     fi
     continue
@@ -126,7 +130,7 @@ do
 Usage:
    ./demo_run <resolution> <agent> [OPTIONS]
    - <resolution> is one of the docker option to build or run.
-   - <agent> is one of alice, faber, acme, uni_reg_a, uni_admin_a, uni_reg_b, uni_admin_b, company_a, performance.
+   - <agent> is one of alice, faber, acme, uni_reg_a, uni_admin_a, uni_reg_b, uni_admin_b, uni_reg_c, uni_admin_c, company_a, performance.
    - Options:
       --events - display on the terminal the webhook events from the ACA-Py agent.
       --timing - at the end of the run, display timing; relevant to the "performance" agent.
@@ -184,6 +188,14 @@ elif [ "$AGENT" = "uni_admin_b" ]; then
   AGENT_MODULE="uni_admin_b"
   AGENT_PORT=8100
   AGENT_PORT_RANGE=8100-8109
+elif [ "$AGENT" = "uni_reg_c" ]; then
+  AGENT_MODULE="uni_reg_c"
+  AGENT_PORT=8110
+  AGENT_PORT_RANGE=8110-8119
+elif [ "$AGENT" = "uni_admin_c" ]; then
+  AGENT_MODULE="uni_admin_c"
+  AGENT_PORT=8120
+  AGENT_PORT_RANGE=8120-8129
 elif [ "$AGENT" = "company_a" ]; then
   AGENT_MODULE="company_a"
   AGENT_PORT=8080
@@ -193,7 +205,7 @@ elif [ "$AGENT" = "performance" ]; then
   AGENT_PORT=8050
   AGENT_PORT_RANGE=8050-8069
 else
-  echo "Please specify which agent you want to run. Choose from 'faber', 'alice', 'acme', 'uni_reg_a', 'uni_admin_a', 'uni_reg_b', 'uni_admin_b', 'company_a', or 'performance'."
+  echo "Please specify which agent you want to run. Choose from 'faber', 'alice', 'acme', 'uni_reg_a', 'uni_admin_a', 'uni_reg_b', 'uni_admin_b', 'uni_reg_c', 'uni_admin_c', 'company_a', or 'performance'."
   exit 1
 fi
 
@@ -259,57 +271,73 @@ fi
 echo "DOCKERHOST=$DOCKERHOST"
 
 DOCKER_ENV="-e LOG_LEVEL=${LOG_LEVEL} -e RUNMODE=${RUNMODE} -e DOCKERHOST=${DOCKERHOST}"
+
 if ! [ -z "$AGENT_PORT" ]; then
   DOCKER_ENV="${DOCKER_ENV} -e AGENT_PORT=${AGENT_PORT}"
 fi
+
 if ! [ -z "$POSTGRES" ]; then
   DOCKER_ENV="${DOCKER_ENV} -e POSTGRES=1 -e RUST_BACKTRACE=1"
 fi
+
 if ! [ -z "$LEDGER_URL" ]; then
   GENESIS_URL="${LEDGER_URL}/genesis"
   DOCKER_ENV="${DOCKER_ENV} -e LEDGER_URL=${LEDGER_URL}"
 fi
+
 if ! [ -z "$GENESIS_URL" ]; then
   DOCKER_ENV="${DOCKER_ENV} -e GENESIS_URL=${GENESIS_URL}"
 fi
+
 if ! [ -z "$AGENT_ENDPOINT" ]; then
   DOCKER_ENV="${DOCKER_ENV} -e AGENT_ENDPOINT=${AGENT_ENDPOINT}"
 fi
+
 if ! [ -z "$EVENTS" ]; then
   DOCKER_ENV="${DOCKER_ENV} -e EVENTS=1"
 fi
+
 if ! [ -z "$SELF_ATTESTED" ]; then
   DOCKER_ENV="${DOCKER_ENV} -e SELF_ATTESTED=${SELF_ATTESTED}"
 fi
+
 if ! [ -z "$TRACE_TARGET" ]; then
   DOCKER_ENV="${DOCKER_ENV} -e TRACE_TARGET=${TRACE_TARGET}"
   DOCKER_ENV="${DOCKER_ENV} -e TRACE_TAG=${TRACE_TAG}"
   DOCKER_ENV="${DOCKER_ENV} -e TRACE_ENABLED=${TRACE_ENABLED}"
 fi
+
 if ! [ -z "$WEBHOOK_TARGET" ]; then
   DOCKER_ENV="${DOCKER_ENV} -e WEBHOOK_TARGET=${WEBHOOK_TARGET}"
 fi
+
 if ! [ -z "$ACAPY_DEBUG_WEBHOOKS" ]; then
   DOCKER_ENV="${DOCKER_ENV} -e ACAPY_DEBUG_WEBHOOKS=${ACAPY_DEBUG_WEBHOOKS}"
 fi
+
 # if $TAILS_NETWORK is specified it will override any previously specified $DOCKER_NET
 if ! [ -z "$TAILS_NETWORK" ]; then
   DOCKER_NET="${TAILS_NETWORK}"
   DOCKER_ENV="${DOCKER_ENV} -e TAILS_NETWORK=${TAILS_NETWORK}"
   DOCKER_ENV="${DOCKER_ENV} -e TAILS_NGROK_NAME=ngrok-tails-server"
 fi
+
 if ! [ -z "$PUBLIC_TAILS_URL" ]; then
   DOCKER_ENV="${DOCKER_ENV} -e PUBLIC_TAILS_URL=${PUBLIC_TAILS_URL}"
 fi
+
 if ! [ -z "$TAILS_FILE_COUNT" ]; then
   DOCKER_ENV="${DOCKER_ENV} -e TAILS_FILE_COUNT=${TAILS_FILE_COUNT}"
 fi
+
 if ! [ -z "$ACAPY_ARG_FILE" ]; then
   DOCKER_ENV="${DOCKER_ENV} -e ACAPY_ARG_FILE=${ACAPY_ARG_FILE}"
 fi
+
 if ! [ -z "$DEMO_EXTRA_AGENT_ARGS" ]; then
   DOCKER_ENV="${DOCKER_ENV} -e DEMO_EXTRA_AGENT_ARGS=${DEMO_EXTRA_AGENT_ARGS}"
 fi
+
 if ! [ -z "${ENABLE_PYDEVD_PYCHARM}" ]; then
   DOCKER_ENV="${DOCKER_ENV} -e ENABLE_PYDEVD_PYCHARM=${ENABLE_PYDEVD_PYCHARM} -e PYDEVD_PYCHARM_CONTROLLER_PORT=${PYDEVD_PYCHARM_CONTROLLER_PORT} -e PYDEVD_PYCHARM_AGENT_PORT=${PYDEVD_PYCHARM_AGENT_PORT}"
 fi
@@ -320,6 +348,7 @@ echo "DOCKER_ENV=$DOCKER_ENV"
 if [ "$OSTYPE" = "msys" ]; then
   DOCKER="winpty docker"
 fi
+
 DOCKER=${DOCKER:-docker}
 
 $DOCKER run --name $AGENT --rm -it ${DOCKER_OPTS} \
