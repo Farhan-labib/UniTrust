@@ -172,23 +172,23 @@ class CompanyAAgent(AriesAgent):
             # AIP 1.0 format
             # Use attributes that match the schema used by uni_reg_a and uni_admin_a
             req_attrs = [
-        {
-            "name": "student_name",
-            "restrictions": [{"schema_name": "university registration schema"}],
-        },
-        {
-            "name": "university_name",
-            "restrictions": [{"schema_name": "university registration schema"}],
-        },
-        {
-            "name": "graduation_year",
-            "restrictions": [{"schema_name": "university registration schema"}],
-        },
-        {
-            "name": "cgpa",
-            "restrictions": [{"schema_name": "university registration schema"}],
-        },
-    ]
+                {
+                    "name": "student_id",
+                    "restrictions": [{"schema_name": "university_registration_schema"}],
+                },
+                {
+                    "name": "student_name",
+                    "restrictions": [{"schema_name": "university_registration_schema"}],
+                },
+                {
+                    "name": "university_name",
+                    "restrictions": [{"schema_name": "university_registration_schema"}],
+                },
+                {
+                    "name": "graduation_year",
+                    "restrictions": [{"schema_name": "university_registration_schema"}],
+                },
+            ]
             
             if SELF_ATTESTED:
                 req_attrs.append({"name": "self_attested_thing"})
@@ -224,23 +224,23 @@ class CompanyAAgent(AriesAgent):
             if cred_type == CRED_FORMAT_INDY:
                 # AIP 2.0 Indy format
                 req_attrs = [
-        {
-            "name": "student_name",
-            "restrictions": [{"schema_name": "university registration schema"}],
-        },
-        {
-            "name": "university_name",
-            "restrictions": [{"schema_name": "university registration schema"}],
-        },
-        {
-            "name": "graduation_year",
-            "restrictions": [{"schema_name": "university registration schema"}],
-        },
-        {
-            "name": "cgpa",
-            "restrictions": [{"schema_name": "university registration schema"}],
-        },
-    ]
+                {
+                    "name": "student_id",
+                    "restrictions": [{"schema_name": "university_registration_schema"}],
+                },
+                {
+                    "name": "student_name",
+                    "restrictions": [{"schema_name": "university_registration_schema"}],
+                },
+                {
+                    "name": "university_name",
+                    "restrictions": [{"schema_name": "university_registration_schema"}],
+                },
+                {
+                    "name": "graduation_year",
+                    "restrictions": [{"schema_name": "university_registration_schema"}],
+                },
+            ]
                 
                 if SELF_ATTESTED:
                     req_attrs.append({"name": "self_attested_thing"})
