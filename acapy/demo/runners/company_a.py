@@ -705,8 +705,10 @@ async def main(args):
                     reuse_connections=company_a_agent.reuse_connections,
                     multi_use_invitations=company_a_agent.multi_use_invitations,
                     public_did_connections=company_a_agent.public_did_connections,
-                    wait=True,
+                    wait=False,  # Fixed: was wait=True
                 )
+                log_msg("📱 QR code generated! Scan with mobile agent to connect.")
+                log_msg("🔄 Connection will be tracked automatically when established.")
 
             elif option == "5":
                 log_status("#24 List Connected Holders")
