@@ -231,6 +231,7 @@ class UniAdminAgent(AriesAgent):
                 log_msg(f"\n=== CREDENTIAL APPROVAL REQUEST RECEIVED ===")
                 log_msg(f"Approval ID: {approval_id}")
                 log_msg(f"From connection: {connection_id}")
+                log_msg(f"Student ID: {student_data.get('student_id', 'N/A')}")
                 log_msg(f"Student Name: {student_data.get('student_name', 'N/A')}")
                 log_msg(f"University: {student_data.get('university_name', 'N/A')}")
                 log_msg(f"Graduation Year: {student_data.get('graduation_year', 'N/A')}")
@@ -473,6 +474,7 @@ async def main(args):
                 for approval_id, data in agent.pending_approvals.items():
                     student_data = data["student_data"]
                     log_msg(f"ID: {approval_id}")
+                    log_msg(f"  Student ID: {student_data.get('student_id', 'N/A')}")
                     log_msg(f"  Student: {student_data.get('student_name', 'N/A')}")
                     log_msg(f"  University: {student_data.get('university_name', 'N/A')}")
                     log_msg(f"  Graduation Year: {student_data.get('graduation_year', 'N/A')}")
@@ -493,6 +495,7 @@ async def main(args):
                 for approval_id, data in agent.pending_approvals.items():
                     student_data = data["student_data"]
                     log_msg(f"ID: {approval_id}")
+                    log_msg(f"  Student ID: {student_data.get('student_id', 'N/A')}")
                     log_msg(f"  Student: {student_data.get('student_name', 'N/A')}")
                     log_msg(f"  University: {student_data.get('university_name', 'N/A')}")
                     log_msg(f"  Graduation Year: {student_data.get('graduation_year', 'N/A')}")
@@ -514,6 +517,7 @@ async def main(args):
                         request_time = datetime.datetime.fromtimestamp(data["request_time"])
                         log_msg(f"\nApproval ID: {approval_id}")
                         log_msg(f"Request Time: {request_time}")
+                        log_msg(f"Student ID: {student_data.get('student_id', 'N/A')}")
                         log_msg(f"Student Name: {student_data.get('student_name', 'N/A')}")
                         log_msg(f"University: {student_data.get('university_name', 'N/A')}")
                         log_msg(f"Graduation Year: {student_data.get('graduation_year', 'N/A')}")

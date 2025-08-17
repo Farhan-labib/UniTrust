@@ -72,6 +72,10 @@ class UniRegAAgent(AriesAgent):
         self.pending_credentials = {}  
         self.approval_responses = {}  
         self.cred_def_id = None
+        
+        # Multi-holder support
+        self.holder_connections = {}  # {connection_id: {label, connected_at, credentials_issued, status}}
+        self.credential_exchanges = {}  # {cred_ex_id: connection_id}
 
     async def detect_connection(self):
         await self._connection_ready
@@ -93,15 +97,92 @@ class UniRegAAgent(AriesAgent):
         # since we're using a custom message checking task
         log_msg(f"Message handler registered for {message_type} (Note: Using custom message checking)")
 
-    def get_holder_connection_id(self):
-        """Get the holder connection ID for credential issuance"""
+    def add_holder_connection(self, connection_id, label=None):
+        """Add a new holder connection"""
+        holder_info = {
+            "connection_id": connection_id,
+            "label": label or f"Holder-{len(self.holder_connections) + 1}",
+            "connected_at": time.time(),
+            "credentials_issued": 0,
+            "status": "active"
+        }
+        self.holder_connections[connection_id] = holder_info
+        
+        # Set first holder as primary for backward compatibility
+        if not self.connection_id:
+            self.connection_id = connection_id
+            self.holder_connection_id = connection_id
+            
+        log_msg(f"🎓 New holder connected: {holder_info['label']} ({connection_id})")
+        log_msg(f"📊 Total active holders: {len([h for h in self.holder_connections.values() if h['status'] == 'active'])}")
+
+    def remove_holder_connection(self, connection_id, reason="credential_issued"):
+        """Remove a holder connection and mark as terminated"""
+        if connection_id in self.holder_connections:
+            holder_info = self.holder_connections[connection_id]
+            holder_info["status"] = "terminated"
+            holder_info["terminated_at"] = time.time()
+            holder_info["termination_reason"] = reason
+            
+            log_msg(f"🔌 Terminating connection: {holder_info['label']} ({connection_id}) - {reason}")
+            
+            # Update primary connection if needed
+            if self.connection_id == connection_id:
+                active_holders = [conn_id for conn_id, info in self.holder_connections.items() 
+                               if info['status'] == 'active']
+                self.connection_id = active_holders[0] if active_holders else None
+                self.holder_connection_id = self.connection_id
+                
+            return True
+        return False
+
+    async def _delayed_termination(self, connection_id):
+        """Helper method to terminate connection after a delay"""
+        try:
+            # Wait a moment for the holder to process the credential
+            await asyncio.sleep(2)
+            # Terminate the connection
+            await self.terminate_holder_connection(connection_id)
+        except Exception as e:
+            log_msg(f"⚠️ Error in delayed termination: {str(e)}")
+
+    async def terminate_holder_connection(self, connection_id):
+        """Actively terminate a holder connection"""
+        try:
+            # First mark as terminated locally
+            self.remove_holder_connection(connection_id, "auto_cleanup")
+            
+            # Then delete the connection via admin API
+            await self.admin_DELETE(f"/connections/{connection_id}")
+            log_msg(f"✅ Successfully terminated connection: {connection_id}")
+            
+        except Exception as e:
+            log_msg(f"❌ Error terminating connection {connection_id}: {e}")
+
+    def get_holder_connection_id(self, specific_connection_id=None):
+        """Get a holder connection ID for credential issuance"""
+        if specific_connection_id and specific_connection_id in self.holder_connections:
+            if self.holder_connections[specific_connection_id]['status'] == 'active':
+                return specific_connection_id
+                
+        # Return any active holder connection
+        for conn_id, info in self.holder_connections.items():
+            if info['status'] == 'active':
+                return conn_id
+                
+        # Fallback to legacy connection tracking
         if self.holder_connection_id:
             return self.holder_connection_id
         elif self.connection_id:
             return self.connection_id
         else:
-            log_msg("⚠️ No holder connection available for credential issuance")
+            log_msg("⚠️ No active holder connections available for credential issuance")
             return None
+
+    def get_active_holders(self):
+        """Get list of all active holder connections"""
+        return {conn_id: info for conn_id, info in self.holder_connections.items() 
+                if info['status'] == 'active'}
 
     def generate_approval_request(self, student_data):
         """Generate approval request to send to admin"""
@@ -174,7 +255,7 @@ class UniRegAAgent(AriesAgent):
             log_msg(f"Error handling basicmessage webhook: {e}")
 
     async def handle_connections(self, payload):
-        """Handle connection state changes"""
+        """Handle connection state changes with multi-holder support"""
         conn_id = payload.get("connection_id")
         state = payload.get("state")
         rfc23_state = payload.get("rfc23_state")
@@ -195,20 +276,27 @@ class UniRegAAgent(AriesAgent):
                     self.admin_connection_id = conn_id
                     log_msg(f"🔧 Admin connection established: {conn_id}")
                 else:
-                    # This is a student/holder connection
+                    # This is a student/holder connection - add to multi-holder support
+                    self.add_holder_connection(conn_id, their_label or alias)
+                    
+                    # Keep backward compatibility
                     if not self.holder_connection_id:
                         self.holder_connection_id = conn_id
-                        self.connection_id = conn_id  # Keep backward compatibility
-                        log_msg(f"🎓 Student/holder connection established: {conn_id}")
-                    else:
-                        log_msg(f"📝 Additional student connection: {conn_id}")
+                        self.connection_id = conn_id
+                        
             except Exception as e:
                 # If we can't get connection info, treat as holder connection
+                self.add_holder_connection(conn_id, "Unknown-Holder")
                 if not self.holder_connection_id:
                     self.holder_connection_id = conn_id
                     self.connection_id = conn_id
-                    log_msg(f"🎓 Student/holder connection established (default): {conn_id}")
-                log_msg(f"Could not determine connection type: {e}")
+                log_msg(f"Could not determine connection type, treating as holder: {e}")
+        
+        elif state in ["abandoned", "deleted"] and conn_id:
+            # Connection was terminated
+            if conn_id in self.holder_connections:
+                self.remove_holder_connection(conn_id, f"connection_{state}")
+            log_msg(f"🔌 Connection {conn_id} was {state}")
 
     async def handle_approval_response(self, message_data):
         """Handle approval response from admin"""
@@ -236,6 +324,76 @@ class UniRegAAgent(AriesAgent):
                     
         except Exception as e:
             log_msg(f"Error handling approval response: {e}")
+
+    async def handle_issue_credential_v2_0(self, payload):
+        """Handle credential exchange events with automatic connection cleanup"""
+        cred_ex_id = payload.get("cred_ex_id")
+        connection_id = payload.get("connection_id")
+        state = payload.get("state")
+        
+        if cred_ex_id and connection_id:
+            self.credential_exchanges[cred_ex_id] = connection_id
+            
+        log_msg(f"🎫 Credential exchange {cred_ex_id}: {state}")
+        
+        # Handle request-received state (when holder accepts offer)
+        if state == "request-received":
+            log_status("#17 Issue credential to X")
+            try:
+                # Get the credential exchange record to extract the credential preview
+                cred_ex_record = await self.admin_GET(
+                    f"/issue-credential-2.0/records/{cred_ex_id}"
+                )
+                
+                # Try to extract credential preview from the offer
+                credential_preview = None
+                if cred_ex_record.get("cred_offer"):
+                    # Get the credential preview from the original offer
+                    if cred_ex_record["cred_offer"].get("credential_preview"):
+                        credential_preview = cred_ex_record["cred_offer"]["credential_preview"]
+                
+                # Build the issue request
+                issue_request = {"comment": f"Issuing credential, exchange {cred_ex_id}"}
+                if credential_preview:
+                    issue_request["credential_preview"] = credential_preview
+                
+                await self.admin_POST(
+                    f"/issue-credential-2.0/records/{cred_ex_id}/issue",
+                    issue_request,
+                )
+                log_msg(f"🎫 Credential issued for exchange {cred_ex_id}")
+            except Exception as e:
+                log_msg(f"❌ Error during credential issuance: {e}")
+                # Fallback to basic issue request
+                await self.admin_POST(
+                    f"/issue-credential-2.0/records/{cred_ex_id}/issue",
+                    {"comment": f"Issuing credential, exchange {cred_ex_id}"},
+                )
+        
+        # Handle credential completion and connection cleanup
+        elif state == "done" and connection_id:
+            # Credential successfully issued
+            if connection_id in self.holder_connections:
+                self.holder_connections[connection_id]["credentials_issued"] += 1
+                holder_info = self.holder_connections[connection_id]
+                
+                log_msg(f"✅ Credential successfully issued to {holder_info['label']}")
+                log_msg(f"🔄 Auto-terminating connection to prevent bloat...")
+                
+                # Simple termination without delay to avoid callback issues
+                try:
+                    await self.terminate_holder_connection(connection_id)
+                except Exception as e:
+                    log_msg(f"⚠️ Error terminating connection: {str(e)}")
+                
+        elif state == "abandoned" and cred_ex_id in self.credential_exchanges:
+            # Credential exchange failed
+            connection_id = self.credential_exchanges[cred_ex_id]
+            if connection_id in self.holder_connections:
+                holder_info = self.holder_connections[connection_id]
+                log_msg(f"❌ Credential exchange failed for {holder_info['label']}")
+                # Optionally terminate failed connections after some attempts
+                # await self.terminate_holder_connection(connection_id)
 
     async def process_approved_credential(self, approval_id):
         """Process an approved credential and issue it to student"""
@@ -288,12 +446,65 @@ class UniRegAAgent(AriesAgent):
         except Exception as e:
             log_msg(f"❌ Error processing approved credential: {e}")
 
+    async def process_approved_credential_for_holder(self, approval_id, target_conn_id):
+        """Process an approved credential and issue it to a specific holder"""
+        if approval_id not in self.pending_credentials:
+            log_msg(f"No pending credential found for approval ID: {approval_id}")
+            return
+            
+        if approval_id not in self.approval_responses:
+            log_msg(f"No approval response found for approval ID: {approval_id}")
+            return
+            
+        approval_response = self.approval_responses[approval_id]
+        if not approval_response.get("approved"):
+            log_msg(f"Credential was not approved for approval ID: {approval_id}")
+            return
+
+        # Validate the target connection exists and is active
+        active_holders = self.get_active_holders()
+        if target_conn_id not in active_holders:
+            log_msg(f"❌ Target holder connection {target_conn_id} is not active.")
+            return
+            
+        pending_cred = self.pending_credentials[approval_id]
+        student_data = pending_cred["student_data"]
+        
+        # Generate and send the credential offer to specific holder
+        exchange_tracing = False  # You can make this configurable
+        
+        try:
+            # Use the credential generation logic with specific holder connection
+            offer_request = self.generate_credential_offer(
+                20,  # Assuming AIP 20
+                CRED_FORMAT_INDY,  # Assuming Indy format
+                self.cred_def_id,
+                exchange_tracing,
+                student_data=student_data,
+                holder_connection_id=target_conn_id  # Pass specific holder connection
+            )
+            
+            await self.admin_POST(
+                "/issue-credential-2.0/send-offer", offer_request
+            )
+            
+            holder_info = active_holders[target_conn_id]
+            log_msg(f"✅ Credential offer sent to {holder_info['label']} (Connection: {target_conn_id}) for approval ID: {approval_id}")
+            
+            # Clean up processed credential
+            del self.pending_credentials[approval_id]
+            del self.approval_responses[approval_id]
+            
+        except Exception as e:
+            log_msg(f"❌ Error processing approved credential for specific holder: {e}")
+
     def generate_credential_offer(self, aip, cred_type, cred_def_id, exchange_tracing, student_data=None, holder_connection_id=None):
         # Use provided student data or default values
         if student_data:
             cred_attrs = student_data
         else:
             cred_attrs = {
+                "student_id": "ST12345",
                 "student_name": "John Doe",
                 "university_name": "Demo University",
                 "graduation_year": "2024",
@@ -395,23 +606,27 @@ class UniRegAAgent(AriesAgent):
         if aip == 10:
             req_attrs = [
                 {
+                    "name": "student_id",
+                    "restrictions": [{"schema_name": "university_registration_schema"}],
+                },
+                {
                     "name": "student_name",
-                    "restrictions": [{"schema_name": "university registration schema"}],
+                    "restrictions": [{"schema_name": "university_registration_schema"}],
                 },
                 {
                     "name": "university_name",
-                    "restrictions": [{"schema_name": "university registration schema"}],
+                    "restrictions": [{"schema_name": "university_registration_schema"}],
                 },
                 {
                     "name": "graduation_year",
-                    "restrictions": [{"schema_name": "university registration schema"}],
+                    "restrictions": [{"schema_name": "university_registration_schema"}],
                 },
             ]
             if revocation:
                 req_attrs.append(
                     {
                         "name": "cgpa",
-                        "restrictions": [{"schema_name": "university registration schema"}],
+                        "restrictions": [{"schema_name": "university_registration_schema"}],
                         "non_revoked": {"to": int(time.time() - 1)},
                     },
                 )
@@ -419,7 +634,7 @@ class UniRegAAgent(AriesAgent):
                 req_attrs.append(
                     {
                         "name": "cgpa",
-                        "restrictions": [{"schema_name": "university registration schema"}],
+                        "restrictions": [{"schema_name": "university_registration_schema"}],
                     }
                 )
             if SELF_ATTESTED:
@@ -450,23 +665,27 @@ class UniRegAAgent(AriesAgent):
             if cred_type == CRED_FORMAT_INDY:
                 req_attrs = [
                     {
+                        "name": "student_id",
+                        "restrictions": [{"schema_name": "university_registration_schema"}],
+                    },
+                    {
                         "name": "student_name",
-                        "restrictions": [{"schema_name": "university registration schema"}],
+                        "restrictions": [{"schema_name": "university_registration_schema"}],
                     },
                     {
                         "name": "university_name",
-                        "restrictions": [{"schema_name": "university registration schema"}],
+                        "restrictions": [{"schema_name": "university_registration_schema"}],
                     },
                     {
                         "name": "graduation_year",
-                        "restrictions": [{"schema_name": "university registration schema"}],
+                        "restrictions": [{"schema_name": "university_registration_schema"}],
                     },
                 ]
                 if revocation:
                     req_attrs.append(
                         {
                             "name": "cgpa",
-                            "restrictions": [{"schema_name": "university registration schema"}],
+                            "restrictions": [{"schema_name": "university_registration_schema"}],
                             "non_revoked": {"to": int(time.time() - 1)},
                         },
                     )
@@ -474,7 +693,7 @@ class UniRegAAgent(AriesAgent):
                     req_attrs.append(
                         {
                             "name": "cgpa",
-                            "restrictions": [{"schema_name": "university registration schema"}],
+                            "restrictions": [{"schema_name": "university_registration_schema"}],
                         }
                     )
                 if SELF_ATTESTED:
@@ -621,8 +840,9 @@ async def main(args):
             public_did_connections=uni_reg_a_agent.public_did_connections,
             extra_args=extra_args,
         )
-        uni_reg_a_schema_name = "university registration schema"
+        uni_reg_a_schema_name = "university_registration_schema"
         uni_reg_a_schema_attrs = [
+            "student_id",
             "student_name",
             "university_name",
             "graduation_year",
@@ -747,12 +967,14 @@ async def main(args):
                     log_msg("No connection to admin established. Please use option 5 first.")
                     continue
                 # Collect student information
+                student_id = await prompt("Enter student ID: ")
                 student_name = await prompt("Enter student name: ")
                 university_name = await prompt("Enter university name: ")
                 graduation_year = await prompt("Enter graduation year: ")
                 cgpa = await prompt("Enter CGPA: ")
                 
                 student_data = {
+                    "student_id": student_id,
                     "student_name": student_name,
                     "university_name": university_name,
                     "graduation_year": graduation_year,
@@ -858,8 +1080,10 @@ async def main(args):
                     reuse_connections=uni_reg_a_agent.reuse_connections,
                     multi_use_invitations=uni_reg_a_agent.multi_use_invitations,
                     public_did_connections=uni_reg_a_agent.public_did_connections,
-                    wait=True,
+                    wait=False,
                 )
+                log_msg("📱 QR code generated! Scan with mobile agent to connect.")
+                log_msg("🔄 Connection will be tracked automatically when established.")
             elif option == "5":
                 log_msg("Please provide admin agent invitation")
                 log_msg("Paste the admin invitation JSON and press Enter:")
@@ -949,7 +1173,7 @@ async def main(args):
                     log_msg("3. Verify admin agent is using --port 8070")
                     log_msg("4. Try restarting admin agent if needed")
             elif option == "6":
-                # Process approved credentials
+                # Process approved credentials with holder selection
                 approved_credentials = [
                     approval_id for approval_id, response in agent.approval_responses.items()
                     if response.get("approved")
@@ -959,14 +1183,47 @@ async def main(args):
                     log_msg("No approved credentials to process.")
                     continue
                 
-                log_msg("Approved credentials:")
-                for approval_id in approved_credentials:
+                # Show available holders
+                active_holders = agent.get_active_holders()
+                if not active_holders:
+                    log_msg("No active holder connections. Cannot issue credentials.")
+                    continue
+                
+                log_msg("\n=== APPROVED CREDENTIALS ===")
+                for i, approval_id in enumerate(approved_credentials, 1):
                     pending_cred = agent.pending_credentials[approval_id]
                     student_data = pending_cred["student_data"]
-                    log_msg(f"  {approval_id}: {student_data.get('student_name')} ({student_data.get('student_id')})")
+                    log_msg(f"  {i}. {approval_id}: {student_data.get('student_name')} - {student_data.get('university_name')}")
                 
-                approval_id = await prompt("Enter approval ID to process: ")
-                await agent.process_approved_credential(approval_id)
+                cred_choice = await prompt("Enter credential number to process: ")
+                try:
+                    cred_index = int(cred_choice) - 1
+                    if cred_index < 0 or cred_index >= len(approved_credentials):
+                        log_msg("Invalid credential number.")
+                        continue
+                    approval_id = approved_credentials[cred_index]
+                except ValueError:
+                    log_msg("Please enter a valid number.")
+                    continue
+                
+                log_msg("\n=== ACTIVE HOLDER CONNECTIONS ===")
+                holder_list = list(active_holders.items())
+                for i, (conn_id, info) in enumerate(holder_list, 1):
+                    log_msg(f"  {i}. {info['label']} ({conn_id})")
+                
+                holder_choice = await prompt("Enter holder number to send credential to: ")
+                try:
+                    holder_index = int(holder_choice) - 1
+                    if holder_index < 0 or holder_index >= len(holder_list):
+                        log_msg("Invalid holder number.")
+                        continue
+                    target_conn_id = holder_list[holder_index][0]
+                except ValueError:
+                    log_msg("Please enter a valid number.")
+                    continue
+                
+                # Process credential with specific holder
+                await agent.process_approved_credential_for_holder(approval_id, target_conn_id)
             elif option == "7":
                 # List pending approvals
                 if not agent.pending_credentials:
@@ -980,8 +1237,35 @@ async def main(args):
                         log_msg(f"\nApproval ID: {approval_id}")
                         log_msg(f"Status: {status}")
                         log_msg(f"Request Time: {request_time}")
-                        log_msg(f"Student: {student_data.get('student_name')} ({student_data.get('student_id')})")
-                        log_msg(f"Program: {student_data.get('program')}")
+                        log_msg(f"Student: {student_data.get('student_name')} - {student_data.get('university_name')}")
+                        log_msg(f"Graduation Year: {student_data.get('graduation_year')} | CGPA: {student_data.get('cgpa')}")
+            elif option == "7a":
+                # Multi-holder management
+                active_holders = agent.get_active_holders()
+                if not active_holders:
+                    log_msg("No active holder connections.")
+                else:
+                    log_msg("\n=== ACTIVE HOLDER CONNECTIONS ===")
+                    for conn_id, info in active_holders.items():
+                        connected_time = datetime.datetime.fromtimestamp(info["connected_at"])
+                        log_msg(f"\nConnection ID: {conn_id}")
+                        log_msg(f"Label: {info['label']}")
+                        log_msg(f"Connected: {connected_time}")
+                        log_msg(f"Credentials Issued: {info['credentials_issued']}")
+                        log_msg(f"Status: {info['status']}")
+                    
+                    # Show terminated connections too
+                    terminated = {k: v for k, v in agent.holder_connections.items() 
+                                if v['status'] == 'terminated'}
+                    if terminated:
+                        log_msg(f"\n=== TERMINATED CONNECTIONS ({len(terminated)}) ===")
+                        for conn_id, info in list(terminated.items())[-5:]:  # Show last 5
+                            terminated_time = datetime.datetime.fromtimestamp(info.get("terminated_at", 0))
+                            log_msg(f"{info['label']}: {info.get('termination_reason', 'unknown')} at {terminated_time}")
+                    
+                    log_msg(f"\n📊 Total connections: {len(agent.holder_connections)}")
+                    log_msg(f"📊 Active: {len(active_holders)}")
+                    log_msg(f"📊 Terminated: {len(terminated)}")
             elif option == "8" and uni_reg_a_agent.revocation:
                 rev_reg_id = (await prompt("Enter revocation registry ID: ")).strip()
                 cred_rev_id = (await prompt("Enter credential revocation ID: ")).strip()
